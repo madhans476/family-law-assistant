@@ -1,0 +1,49 @@
+[project]
+name = "family-law-assistant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Core Framework
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.38.0",
+    "python-multipart>=0.0.6",
+    # LangChain & LangGraph
+    "langchain>=0.1.4",
+    "langsmith>=0.0.77",
+    "langchain-community>=0.4.1",
+    "langchain-core>=1.0.2",
+    "langchain-huggingface>=1.0.0",
+    "langchain-mistralai>=1.0.1",
+    "langchain-text-splitters>=1.0.0",
+    "langgraph>=1.0.2",
+    # Vector Store
+    "pymilvus>=2.6.3",
+    # Embeddings & LLM
+    "transformers>=4.36.2",
+    "torch>=2.1.2",
+    "requests>=2.31.0",
+    "tiktoken>=0.12.0",
+    "sentence-transformers>=4.1.0",
+    # Data Processing
+    "pydantic>=2.5.3",
+    "pydantic-settings>=2.1.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "httpx>=0.26.0",
+    "websockets>=12.0",
+    # Monitoring & Logging
+    "loguru>=0.7.2",
+    "accelerate>=1.12.0",
+    "psutil>=7.2.0",
+    "rich>=14.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4.4",
+    "pytest-asyncio==0.23.3",
+    "black==24.1.1",
+    "ruff==0.1.14",
+]
