@@ -1,11 +1,22 @@
+"""
+Enhanced Generator Node - Generates comprehensive legal advice.
+
+This version incorporates collected case information for more accurate responses.
+"""
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict
 from state import FamilyLawState
 import os
+import logging
 
-# Initialize LLM - Llama 3.1 8B Instruct from Hugging Face
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize LLM
 llm = ChatHuggingFace(
     llm=HuggingFaceEndpoint(
         repo_id="meta-llama/Llama-3.1-8B-Instruct",
@@ -14,103 +25,123 @@ llm = ChatHuggingFace(
     )
 )
 
+SYSTEM_PROMPT = """You are a senior Indian family law attorney with 20+ years of experience. 
+Your role is to provide clear, actionable legal advice based on case information and relevant legal precedents.
 
-SYSTEM_PROMPT = """You are a knowledgeable family law legal assistant. Your role is to provide accurate, helpful information about family law matters based on the retrieved case information and legal expertise.
+GUIDELINES:
+1. Provide practical, step-by-step advice
+2. Reference relevant Indian laws, sections, and precedents
+3. Explain legal terms in simple English (Flesch Reading Ease score ≥ 55)
+4. Be empathetic and also professional - family law matters are emotionally charged
+5. Prioritize safety in domestic violence cases
+6. Clarify this is informational advice, not a substitute for personalized legal representation
+7. Structure your response with clear sections:
+   - Immediate Actions
+   - Legal Options Available
+   - Relevant Laws & Precedents
+   - Next Steps
+8. Never make up information - only use provided context and case details
 
-Guidelines:
-- Provide clear, practical advice based on the context provided
-- Reference relevant cases or legal principles when applicable
-- Be empathetic and professional, as family law matters are often sensitive
-- If the retrieved information doesn't fully address the query, acknowledge this and provide general guidance
-- Always clarify that this is informational and not a substitute for personalized legal advice
-- Format your response clearly with proper structure
+IMPORTANT: Format your response professionally with proper sections and bullet points where appropriate."""
 
-Never make up information. Only use the provided context."""
-
-def format_context(retrieved_chunks):
-    """Format retrieved chunks into context string."""
-    context_parts = []
-    for i, chunk in enumerate(retrieved_chunks, 1):
-        context_parts.append(f"[Source {i}] (Category: {chunk['metadata']['category']})")
+def format_context(retrieved_chunks: list) -> str:
+    """Format retrieved chunks into structured context."""
+    if not retrieved_chunks:
+        return "No relevant precedents found."
+    
+    context_parts = ["RELEVANT LEGAL PRECEDENTS AND CASES:\n"]
+    
+    for i, chunk in enumerate(retrieved_chunks[:5], 1):  # Limit to top 5
+        context_parts.append(f"\n[Precedent {i}]")
         context_parts.append(f"Title: {chunk['metadata']['title']}")
-        context_parts.append(f"Content: {chunk['content']}")
-        context_parts.append(f"Relevance Score: {chunk['score']:.3f}\n")
+        context_parts.append(f"Category: {chunk['metadata']['category']}")
+        context_parts.append(f"Relevance: {chunk['score']:.2%}")
+        context_parts.append(f"Content: {chunk['content'][:500]}...")  # Truncate long content
+        context_parts.append("")
     
     return "\n".join(context_parts)
 
+def format_case_info(info_collected: Dict, case_type: str) -> str:
+    """Format collected case information."""
+    if not info_collected:
+        return "Limited case information available."
+    
+    case_summary = [f"CASE TYPE: {case_type.upper().replace('_', ' ')}\n"]
+    case_summary.append("CASE DETAILS:")
+    
+    for key, value in info_collected.items():
+        case_summary.append(f"- {key.replace('_', ' ').title()}: {value}")
+    
+    return "\n".join(case_summary)
+
 def generate_response(state: FamilyLawState) -> Dict:
     """
-    Generate a response using Claude based on retrieved context.
+    Generate comprehensive legal advice based on case information and retrieved context.
     """
     query = state["query"]
     retrieved_chunks = state.get("retrieved_chunks", [])
     messages = state.get("messages", [])
+    info_collected = state.get("info_collected", {})
+    case_type = state.get("case_type", "general")
     
+    # Validate we have information
     if not retrieved_chunks:
+        logger.warning("No retrieved chunks available for generation")
         return {
-            "response": "I apologize, but I couldn't find relevant information in the family law database to answer your question. Please try rephrasing your question or ask about topics like divorce, custody, domestic violence, dowry, or marital cruelty."
+            "response": "I apologize, but I couldn't find sufficient relevant information in the legal database to provide comprehensive advice for your specific situation. Please consider consulting with a family law attorney directly.",
+            "messages": messages
         }
     
-    # Format context
-    context = format_context(retrieved_chunks)
+    # Format context and case information
+    legal_context = format_context(retrieved_chunks)
+    case_information = format_case_info(info_collected, case_type)
     
     # Build conversation with history
     conversation = [SystemMessage(content=SYSTEM_PROMPT)]
     
-    # Add previous messages (history)
+    # Add relevant previous context (last 4 messages)
     if messages:
-        conversation.extend(messages)
+        conversation.extend(messages[-4:])
     
-    # Add current query with context
-#     user_message = f"""Based on the following retrieved information from family law cases, please answer the user's question:
+    # Construct the prompt
+    prompt = f"""Based on the collected case information and relevant legal precedents, provide comprehensive legal advice.
 
-#       RETRIEVED CONTEXT:
-#       {context}
+{case_information}
 
-#       USER QUESTION: {query}
+{legal_context}
 
-#       Provide a comprehensive, helpful response based on the above context."""
-    
-    example_query = ("I got engaged in June 2018 and married in February 2019. Soon after, my husband stopped caring for me and the household, then left. "
-                         "He abused me for talking to friends and about my past, which he already knew. Yesterday, he called me to meet, and I hoped we could reconcile. "
-                         "Instead, he beat me and stopped me from leaving. I escaped this morning. I want a divorce as soon as possible.")
-    
-    example_responses = [
-            "First, lodge an FIR under Section 498A for cruelty. Then consult a lawyer to file two cases: one under the Domestic Violence Act, and another for Judicial Separation under Section 10 of the Hindu Marriage Act, since you can’t seek divorce before one year of marriage.",
-            "You can file for divorce in family court under the Hindu Marriage Act on grounds of mental and physical cruelty. Also, register an FIR under Sections 498A and 323 IPC.",
-            "Since you married in February 2019, you must wait one year before filing for divorce. Meanwhile, file a police complaint for assault — it will support your case for cruelty. You can also claim maintenance under Section 125 CrPC if he isn’t supporting you."
-        ]
-    
-    prompt = (
-            "You are a senior Indian family law analyst. Follow the guidelines strictly. "
-            "Explain legal issues in simple, plain English that anyone can understand. Use a warm, professional tone, and avoid robotic phrasing. "
-            "Do not include reasoning scaffolds, JSON, or any pre/post text.\n\n"
-            "Guidelines:\n"
-            "- Internally reason as Issue → Rule (statute/precedent) → Application → Conclusion, but only output the detailed final answer.\n"
-            "- Prefer authoritative Indian sources and cite succinctly, e.g., (IPC s.498A), (HMA 1955 s.13), (CrPC s.125).\n"
-            "- If a precise section is uncertain, mention it briefly without guessing.\n"
-            "- Give a concise response to ensure a Flesch Reading Ease score of atleast 55.\n"
-            "- Explain legal terms briefly in everyday language when necessary.\n"
-            "- Give practical guidance wherever possible, focusing on what a person can realistically do.\n\n"
-            "Style Example (tone only, not ground truth):\n"
-            f"Query:\n{example_query}\n\n"
-            "Example Responses:\n"
-            f"1. {example_responses[0]}\n"
-            f"2. {example_responses[1]}\n"
-            f"3. {example_responses[2]}\n"
+CURRENT QUERY: {query}
 
-            f"Context:\n{context}\n\n"
-            "Now answer this user query with the detailed final answer only:\n"
-            f"User Question: {query}\n\n"
-            "Answer:"
-        )
+Provide a detailed, well-structured response that:
+1. Addresses the immediate concerns
+2. Outlines available legal options
+3. References specific Indian laws and sections
+4. Provides clear next steps
+5. Uses simple, empathetic language
+
+YOUR RESPONSE:"""
     
     conversation.append(HumanMessage(content=prompt))
     
-    # Generate response
-    response = llm.invoke(conversation)
+    try:
+        # Generate response
+        response = llm.invoke(conversation)
+        
+        # Add disclaimer if not already present
+        response_content = response.content
+        if "not a substitute for legal advice" not in response_content.lower():
+            response_content += "\n\n---\n*Disclaimer: This information is for educational purposes only and does not constitute legal advice. Please consult with a qualified family law attorney for personalized legal guidance.*"
+        
+        logger.info(f"Successfully generated response for case type: {case_type}")
+        
+        return {
+            "response": response_content,
+            "messages": conversation + [response]
+        }
     
-    return {
-        "response": response.content,
-        "messages": conversation + [response]
-    }
+    except Exception as e:
+        logger.error(f"Error generating response: {str(e)}")
+        return {
+            "response": f"I apologize, but I encountered an error while generating advice. Please try rephrasing your question or contact support. Error: {str(e)}",
+            "messages": messages
+        }
