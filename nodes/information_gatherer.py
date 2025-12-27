@@ -1,12 +1,10 @@
 """
-Enhanced Information Gatherer Node - Iteratively collects information.
+Fixed Information Gatherer Node - Properly updates state between iterations.
 
-This node:
-1. Receives the list of needed information from query_analyzer
-2. Asks ONE question at a time
-3. Extracts the answer from user's response
-4. Updates info_collected and info_needed_list
-5. Continues until all information is gathered
+Key fixes:
+1. Correctly identifies when processing user responses vs asking new questions
+2. Properly updates info_collected and removes from info_needed_list
+3. Better extraction logic
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -30,46 +28,32 @@ class InformationGatherer:
 SITUATION:
 - User Intent: {user_intent}
 - Information already collected: {info_collected}
-- Information still needed: {info_needed}
-- Current gathering step: {step}
+- Next information needed: {current_target}
+- All remaining needs: {all_remaining}
 
 YOUR TASK:
-Generate ONE clear, empathetic, professional question to gather the MOST IMPORTANT missing information.
+Ask ONE clear, empathetic question to gather information about: {current_target}
 
 GUIDELINES:
-1. Ask only ONE question at a time
+1. Ask only about {current_target} - be specific
 2. Be empathetic and professional
 3. Use simple, clear language
-4. For domestic violence: prioritize safety questions
-5. Make the question specific and easy to answer
-6. Refer to previously collected information naturally
+4. Reference previously collected information naturally if relevant
+5. Make it easy for the user to answer
 
-Format your response as JSON:
-{{
-  "question": "your question here",
-  "info_target": "the specific information key this question addresses"
-}}
+YOUR QUESTION:"""
 
-YOUR QUESTION (JSON only):"""
+    ANSWER_EXTRACTION_PROMPT = """Extract the answer from the user's response.
 
-    ANSWER_EXTRACTION_PROMPT = """You are an information extraction expert. Extract ONLY the relevant answer from the user's response.
+QUESTION ASKED: We need information about "{info_target}"
+USER'S RESPONSE: {user_response}
 
-QUESTION CONTEXT: We asked about {info_target}
-USER'S ANSWER: "{user_response}"
+Extract ONLY the relevant information that answers what we asked about.
+Be concise but capture all relevant details.
 
-Extract the direct answer. Be concise and specific.
+If the user didn't provide the information, respond with "NOT_PROVIDED"
 
-Return JSON:
-{{
-  "extracted_value": "the answer only, not the full sentence"
-}}
-
-Examples:
-- If user says "I got married in 2015" → "2015"
-- If user says "yes, currently married" → "currently married"  
-- If user says "We have 2 children, ages 5 and 8" → "2 children, ages 5 and 8"
-
-EXTRACTION (JSON only):"""
+EXTRACTED ANSWER:"""
     
     def __init__(self, huggingface_api_key: str = None):
         """Initialize the InformationGatherer with LLM."""
@@ -86,150 +70,141 @@ EXTRACTION (JSON only):"""
     
     def gather_next_information(self, state: FamilyLawState) -> Dict:
         """
-        Generate next question or extract information from user's response.
+        Main logic: Extract answer from previous response OR ask next question.
         
-        Returns:
-            Dict with:
-            - needs_more_info: bool
-            - follow_up_question: str (if needs_more_info is True)
-            - info_collected: dict
-            - info_needed_list: list
+        Flow:
+        1. If gathering_step > 0: Extract answer from last user message
+        2. Update info_collected, remove from info_needed_list
+        3. If still need info: Generate next question
+        4. If no more info needed: Mark as complete
         """
         query = state["query"]
         messages = state.get("messages", [])
-        info_collected = dict(state.get("info_collected", {}))  # Create a copy
-        info_needed_list = list(state.get("info_needed_list", []))  # Create a copy
+        info_collected = dict(state.get("info_collected", {}))
+        info_needed_list = list(state.get("info_needed_list", []))
         user_intent = state.get("user_intent", "legal advice")
         gathering_step = state.get("gathering_step", 0)
         
-        logger.info(f"Gathering step {gathering_step}, needed: {info_needed_list}, collected: {list(info_collected.keys())}")
+        logger.info(f"=== Gathering Step {gathering_step} ===")
+        logger.info(f"Info needed: {info_needed_list}")
+        logger.info(f"Info collected keys: {list(info_collected.keys())}")
         
-        # If no information is needed, we're done
-        if not info_needed_list:
-            logger.info("No information needed, gathering complete")
-            return {
-                "needs_more_info": False,
-                "info_collected": info_collected,
-                "info_needed_list": [],
-                "gathering_step": gathering_step
-            }
-        
-        # Check if we're processing a user response (gathering_step > 0 means we already asked a question)
-        if gathering_step > 0:
-            # Find the last user message (the answer to our question)
-            last_user_message = None
+        # STEP 1: Check if we need to extract an answer from previous response
+        if gathering_step > 0 and info_needed_list:
+            # Get the target we were asking about (stored separately or use first in list)
+            current_target = state.get("current_question_target") or info_needed_list[0]
             
-            # Look for the most recent HumanMessage that isn't the initial query
-            for msg in reversed(messages):
-                if msg.__class__.__name__ == "HumanMessage":
-                    # Skip if this is the first message (initial query)
-                    if len([m for m in messages if m.__class__.__name__ == "HumanMessage"]) > gathering_step:
-                        last_user_message = msg
-                        break
+            # Find the last user message
+            last_user_msg = None
+            user_messages = [m for m in messages if m.__class__.__name__ == "HumanMessage"]
             
-            if last_user_message and info_needed_list:
-                # Extract the answer for the current target
-                current_target = info_needed_list[0]
-                logger.info(f"Extracting answer for: {current_target}")
-                logger.info(f"User response: {last_user_message.content[:100]}")
+            # Skip the initial query, get the response to our question
+            if len(user_messages) > gathering_step:
+                last_user_msg = user_messages[gathering_step]
                 
-                extracted_info = self._extract_information(
-                    last_user_message.content,
+            if last_user_msg:
+                logger.info(f"Extracting answer for: {current_target}")
+                logger.info(f"From response: {last_user_msg.content[:100]}...")
+                
+                # Extract the information
+                extracted = self._extract_information(
+                    last_user_msg.content,
                     current_target
                 )
                 
-                logger.info(f"Extraction result: confidence={extracted_info['confidence']}, value={extracted_info['extracted_value'][:50]}")
+                logger.info(f"Extracted value: {extracted[:100]}...")
                 
-                # Always store the answer (even if confidence is low, we move forward)
-                info_collected[current_target] = extracted_info["extracted_value"]
-                info_needed_list = info_needed_list[1:]  # Remove this item
-                
-                logger.info(f"✓ Stored {current_target}")
-                logger.info(f"Remaining items: {info_needed_list}")
-            else:
-                logger.warning(f"No user message found or no items needed")
+                # CRITICAL: Store the answer and remove from needed list
+                if extracted and extracted != "NOT_PROVIDED":
+                    info_collected[current_target] = extracted
+                    # Remove this item from needed list
+                    if current_target in info_needed_list:
+                        info_needed_list.remove(current_target)
+                    
+                    logger.info(f"✓ Stored answer for: {current_target}")
+                    logger.info(f"Updated needed list: {info_needed_list}")
+                else:
+                    logger.warning(f"User didn't provide {current_target}, keeping in list")
         
-        # Check if we still need more information
+        # STEP 2: Check if we're done
         if not info_needed_list:
-            logger.info("All information collected successfully!")
+            logger.info("✓ All information collected! Gathering complete.")
             return {
                 "needs_more_info": False,
                 "info_collected": info_collected,
                 "info_needed_list": [],
-                "gathering_step": gathering_step
+                "gathering_step": gathering_step,
+                "current_question_target": None
             }
         
-        # Generate next question
+        # STEP 3: Generate next question for the first item in needed list
+        next_target = info_needed_list[0]
+        logger.info(f"Generating question for: {next_target}")
+        
         next_question = self._generate_question(
             user_intent,
             info_collected,
-            info_needed_list,
-            gathering_step
+            next_target,
+            info_needed_list
         )
         
-        logger.info(f"Generated question for next item: {info_needed_list[0]}")
+        logger.info(f"Generated question: {next_question[:100]}...")
         
         return {
             "needs_more_info": True,
             "follow_up_question": next_question,
             "info_collected": info_collected,
             "info_needed_list": info_needed_list,
-            "gathering_step": gathering_step + 1
+            "gathering_step": gathering_step + 1,
+            "current_question_target": next_target  # Store what we're asking about
         }
     
     def _generate_question(
         self,
         user_intent: str,
         info_collected: Dict,
-        info_needed_list: List[str],
-        step: int
+        current_target: str,
+        all_remaining: List[str]
     ) -> str:
-        """Generate a question for the next piece of needed information."""
+        """Generate a focused question for the specific information needed."""
         
-        # Format collected and needed info
         collected_str = self._format_info_collected(info_collected)
-        needed_str = self._format_info_needed(info_needed_list)
         
         # Prepare prompt
         prompt = self.QUESTION_GENERATION_PROMPT.format(
             user_intent=user_intent.replace("_", " ").title(),
-            info_collected=collected_str,
-            info_needed=needed_str,
-            step=step
+            info_collected=collected_str or "None yet",
+            current_target=current_target.replace("_", " ").title(),
+            all_remaining=", ".join([x.replace("_", " ") for x in all_remaining])
         )
         
         try:
             conversation = [
-                SystemMessage(content="You are an empathetic family law attorney. Respond ONLY with JSON."),
+                SystemMessage(content="You are an empathetic family law attorney. Ask ONE focused question."),
                 HumanMessage(content=prompt)
             ]
             
             response = self.llm.invoke(conversation)
-            response_text = response.content.strip()
+            question = response.content.strip()
             
-            # Extract JSON
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Clean up any extra text
+            if "YOUR QUESTION:" in question:
+                question = question.split("YOUR QUESTION:")[-1].strip()
+            if "Question:" in question:
+                question = question.split("Question:")[-1].strip()
             
-            question_data = json.loads(response_text)
-            question = question_data.get("question", "")
-            
-            # Clean up the question
-            if ":" in question and len(question.split(":")[0].split()) <= 3:
-                question = question.split(":", 1)[1].strip()
+            # Remove quotes if present
+            question = question.strip('"\'')
             
             return question
         
         except Exception as e:
             logger.error(f"Error generating question: {str(e)}")
-            # Fallback to simple question
-            next_needed = info_needed_list[0].replace("_", " ").title()
-            return f"Could you please provide details about: {next_needed}?"
+            # Fallback
+            return f"Could you please provide information about: {current_target.replace('_', ' ')}?"
     
-    def _extract_information(self, user_response: str, info_target: str) -> Dict:
-        """Extract information from user's response."""
+    def _extract_information(self, user_response: str, info_target: str) -> str:
+        """Extract specific information from user's response."""
         
         prompt = self.ANSWER_EXTRACTION_PROMPT.format(
             info_target=info_target.replace("_", " ").title(),
@@ -238,41 +213,28 @@ EXTRACTION (JSON only):"""
         
         try:
             conversation = [
-                SystemMessage(content="You extract answers from text. Respond ONLY with JSON."),
+                SystemMessage(content="Extract only the relevant answer. Be concise."),
                 HumanMessage(content=prompt)
             ]
             
             response = self.llm.invoke(conversation)
-            response_text = response.content.strip()
+            extracted = response.content.strip()
             
-            # Extract JSON
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Clean up
+            if "EXTRACTED ANSWER:" in extracted:
+                extracted = extracted.split("EXTRACTED ANSWER:")[-1].strip()
             
-            extraction = json.loads(response_text)
+            extracted = extracted.strip('"\'')
             
-            extracted_value = extraction.get("extracted_value", user_response).strip()
+            # If extraction failed or empty, use full response
+            if not extracted or len(extracted) < 3:
+                extracted = user_response.strip()
             
-            # If extraction is empty or just says "not provided", use full response
-            if not extracted_value or extracted_value.lower() in ["not provided", "none", "n/a"]:
-                extracted_value = user_response.strip()
-            
-            logger.info(f"Extracted: {extracted_value[:100]}")
-            
-            return {
-                "extracted_value": extracted_value,
-                "confidence": "high"  # Always proceed
-            }
+            return extracted
         
         except Exception as e:
             logger.error(f"Error extracting information: {str(e)}")
-            # Fallback: use the full response
-            return {
-                "extracted_value": user_response.strip(),
-                "confidence": "high"  # Always proceed to avoid loops
-            }
+            return user_response.strip()
     
     def _format_info_collected(self, info_collected: Dict) -> str:
         """Format collected information for display."""
@@ -282,14 +244,4 @@ EXTRACTION (JSON only):"""
         formatted = []
         for key, value in info_collected.items():
             formatted.append(f"- {key.replace('_', ' ').title()}: {value}")
-        return "\n".join(formatted)
-    
-    def _format_info_needed(self, info_needed_list: List[str]) -> str:
-        """Format the list of needed information."""
-        if not info_needed_list:
-            return "All information collected."
-        
-        formatted = []
-        for i, item in enumerate(info_needed_list, 1):
-            formatted.append(f"{i}. {item.replace('_', ' ').title()}")
         return "\n".join(formatted)

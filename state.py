@@ -1,8 +1,5 @@
 """
-Enhanced State Management for Family Law Assistant.
-
-This state supports multi-turn conversations with structured information collection
-and visibility of all intermediate steps.
+Enhanced State with tracking for current question target.
 """
 
 from typing import TypedDict, List, Dict, Optional, Literal
@@ -15,29 +12,30 @@ class FamilyLawState(MessagesState):
     query: str
     
     # Analysis phase
-    user_intent: Optional[str]  # What user wants to achieve
-    analysis_complete: bool  # Whether initial analysis is done
-    needs_clarification: bool  # Whether user intent needs clarification
-    clarification_question: Optional[str]  # Question to clarify intent
+    user_intent: Optional[str]
+    analysis_complete: bool = False
+    needs_clarification: bool = False
+    clarification_question: Optional[str] = None
     
     # Information collection phase
-    in_gathering_phase: bool = False  # Whether we're currently gathering info
-    has_sufficient_info: bool = False  # Whether we have enough info to answer
-    info_collected: Dict[str, str] = {}  # Information already gathered {key: value}
-    info_needed_list: List[str] = []  # List of specific information still needed
-    needs_more_info: bool = True  # Whether to ask follow-up questions
-    follow_up_question: Optional[str] = None  # The question to ask
-    gathering_step: int = 0  # Current step in gathering process
+    in_gathering_phase: bool = False
+    has_sufficient_info: bool = False
+    info_collected: Dict[str, str] = {}
+    info_needed_list: List[str] = []
+    needs_more_info: bool = True
+    follow_up_question: Optional[str] = None
+    gathering_step: int = 0
+    current_question_target: Optional[str] = None  # Track what we're currently asking about
     
     # Retrieval results
-    retrieved_chunks: List[Dict]
+    retrieved_chunks: List[Dict] = []
     
     # Generated response
-    response: str
+    response: str = ""
     
     # Metadata
-    sources: List[Dict]
-    message_type: Optional[Literal["clarification", "information_gathering", "final_response"]]
+    sources: List[Dict] = []
+    message_type: Optional[Literal["clarification", "information_gathering", "final_response"]] = None
     
     # History management
-    conversation_id: Optional[str]
+    conversation_id: Optional[str] = None
