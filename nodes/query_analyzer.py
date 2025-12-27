@@ -1,10 +1,11 @@
 """
-Query Analyzer Node - Analyzes user queries to understand intent and information needs.
+Enhanced Query Analyzer Node - Analyzes user queries with intent confidence.
 
 This node identifies:
-1. Case type (divorce, domestic violence, custody, etc.)
-2. Information already provided by the user
-3. Critical information still needed
+1. User intent and confidence level (high/medium/low)
+2. Case type (divorce, domestic violence, custody, etc.)
+3. Information already provided by the user
+4. Critical information still needed
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -14,7 +15,6 @@ import os
 import json
 import logging
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +27,16 @@ class QueryAnalyzer:
     QUERY_ANALYSIS_PROMPT = """You are an expert Indian FAMILY LAW analyst. Analyze the user's query to understand their legal situation.
 
 Your task is to:
-1. Identify the PRIMARY case type or intent, it can be divorce, domestic_violence, dowry, child_custody, maintenance, general, etc.,
-2. Extract what information the user HAS PROVIDED.
-3. Identify what CRITICAL information is STILL NEEDED to give proper legal advice, no assumptions.
+1. Identify the PRIMARY legal intent (what they want help with)
+2. Assess confidence in understanding their intent (high/medium/low)
+3. Extract what information the user HAS PROVIDED
+4. Identify what CRITICAL information is STILL NEEDED
 
 RESPONSE FORMAT (Strictly JSON only, no other text):
 {{
   "user_intent": "brief description of what user wants to achieve",
+  "intent_confidence": "high|medium|low",
+  "case_type": "divorce|domestic_violence|dowry|child_custody|maintenance|general",
   "info_provided": {{
     "key1": "value1",
     "key2": "value2"
@@ -41,14 +44,20 @@ RESPONSE FORMAT (Strictly JSON only, no other text):
   "info_needed": [
     "specific_info_1",
     "specific_info_2"
-  ],
+  ]
 }}
+
+CONFIDENCE GUIDELINES:
+- HIGH: Query is clear, specific, contains context
+- MEDIUM: General direction is clear but lacks some context
+- LOW: Vague, ambiguous, or completely unclear what user needs
 
 RULES:
 - If user provides comprehensive details, set "info_needed": []
 - If critical information is missing, list specific needs
 - Extract dates, relationships, incidents from the query
 - Be specific about what's needed (e.g., "marriage_date" not just "details")
+- If query is too vague, set confidence to "low"
 
 USER QUERY:
 {query}
@@ -56,12 +65,7 @@ USER QUERY:
 ANALYSIS (JSON only):"""
     
     def __init__(self, huggingface_api_key: str = None):
-        """
-        Initialize the QueryAnalyzer with LLM.
-        
-        Args:
-            huggingface_api_key: HuggingFace API key (optional, uses env var if not provided)
-        """
+        """Initialize the QueryAnalyzer with LLM."""
         api_key = huggingface_api_key or os.getenv("HUGGINGFACE_API_KEY")
         
         self.llm = ChatHuggingFace(
@@ -69,6 +73,7 @@ ANALYSIS (JSON only):"""
                 repo_id="meta-llama/Llama-3.1-8B-Instruct",
                 huggingfacehub_api_token=api_key,
                 task="text-generation",
+                max_new_tokens=1024,
             )
         )
     
@@ -80,11 +85,7 @@ ANALYSIS (JSON only):"""
             state: FamilyLawState containing the query
             
         Returns:
-            Dict with:
-            - info_collected: dict
-            - info_needed_list: list
-            - has_sufficient_info: bool
-            - user_intent: str
+            Dict with analysis results
         """
         query = state["query"]
         
@@ -97,12 +98,12 @@ ANALYSIS (JSON only):"""
                 SystemMessage(content="You are a legal query analyzer. Respond ONLY with valid JSON."),
                 HumanMessage(content=prompt)
             ]
+            
             logger.info("Invoking LLM for query analysis")
             response = self.llm.invoke(conversation)
             response_text = response.content.strip()
             
             # Extract JSON from response
-            # Sometimes LLM adds markdown backticks
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
@@ -112,23 +113,29 @@ ANALYSIS (JSON only):"""
             analysis = json.loads(response_text)
             
             # Validate and set defaults
+            user_intent = analysis.get("user_intent", "")
+            intent_confidence = analysis.get("intent_confidence", "medium")
+            case_type = analysis.get("case_type", "general")
             info_provided = analysis.get("info_provided", {})
             info_needed = analysis.get("info_needed", [])
-            has_sufficient_info = analysis.get("has_sufficient_info", False)
-            user_intent = analysis.get("user_intent", "Seeking legal advice")
             
-            logger.info(f"Query analysis: sufficient_info={has_sufficient_info}, needs={len(info_needed)} items")
+            # Determine if we have sufficient info
+            has_sufficient_info = len(info_needed) == 0 and len(info_provided) > 0
+            
+            logger.info(f"Query analysis: intent_confidence={intent_confidence}, "
+                       f"case_type={case_type}, needs={len(info_needed)} items")
             
             return {
+                "user_intent": user_intent,
+                "intent_confidence": intent_confidence,
+                "case_type": case_type,
                 "info_collected": info_provided,
                 "info_needed_list": info_needed,
-                "has_sufficient_info": has_sufficient_info,
-                "user_intent": user_intent
+                "has_sufficient_info": has_sufficient_info
             }
         
         except json.JSONDecodeError as e:
             logger.error(f"JSON parsing error: {str(e)}\nResponse: {response_text[:200]}")
-            # Fallback: basic keyword analysis
             return self.fallback_analysis(query)
         
         except Exception as e:
@@ -138,28 +145,28 @@ ANALYSIS (JSON only):"""
     def fallback_analysis(self, query: str) -> Dict:
         """
         Fallback keyword-based analysis if LLM fails.
-        
-        Args:
-            query: User query string
-            
-        Returns:
-            Dict with analysis results
         """
         query_lower = query.lower()
         
         # Determine case type
         if any(word in query_lower for word in ["violence", "abuse", "beat", "assault", "hit", "threat"]):
             case_type = "domestic_violence"
+            user_intent = "Seeking help with domestic violence"
         elif any(word in query_lower for word in ["dowry", "dahej", "demand", "harassment"]):
             case_type = "dowry"
+            user_intent = "Seeking help with dowry-related issues"
         elif any(word in query_lower for word in ["custody", "children", "child", "visitation"]):
             case_type = "child_custody"
+            user_intent = "Seeking help with child custody"
         elif any(word in query_lower for word in ["divorce", "separation", "marriage"]):
             case_type = "divorce"
+            user_intent = "Seeking help with divorce/separation"
         elif any(word in query_lower for word in ["maintenance", "alimony", "support"]):
             case_type = "maintenance"
+            user_intent = "Seeking help with maintenance/alimony"
         else:
             case_type = "general"
+            user_intent = "Seeking family law advice"
         
         # Basic information extraction
         info_provided = {}
@@ -168,223 +175,40 @@ ANALYSIS (JSON only):"""
         if "child" in query_lower:
             info_provided["children_mentioned"] = "yes"
         
-        # Determine if we need more info
-        has_sufficient_info = len(query.split()) > 30  # If query is detailed
+        # Determine confidence and info needs
+        word_count = len(query.split())
+        if word_count > 50:
+            intent_confidence = "high"
+            info_needed = []
+            has_sufficient_info = True
+        elif word_count > 20:
+            intent_confidence = "medium"
+            info_needed = self._get_case_specific_needs(case_type)
+            has_sufficient_info = False
+        else:
+            intent_confidence = "low"
+            info_needed = []  # Will trigger clarification
+            has_sufficient_info = False
         
-        info_needed = []
-        if not has_sufficient_info:
-            if case_type == "divorce":
-                info_needed = ["marriage_date", "grounds_for_divorce", "children_details"]
-            elif case_type == "domestic_violence":
-                info_needed = ["current_safety_status", "incident_details", "relationship_to_perpetrator"]
-            elif case_type == "child_custody":
-                info_needed = ["children_ages", "current_custody_arrangement"]
-            else:
-                info_needed = ["detailed_situation", "timeline_of_events"]
-        
-        logger.info(f"Fallback analysis: case_type={case_type}")
+        logger.info(f"Fallback analysis: case_type={case_type}, confidence={intent_confidence}")
         
         return {
+            "user_intent": user_intent,
+            "intent_confidence": intent_confidence,
             "case_type": case_type,
             "info_collected": info_provided,
             "info_needed_list": info_needed,
-            "has_sufficient_info": has_sufficient_info,
-            "user_intent": "Seeking legal advice"
+            "has_sufficient_info": has_sufficient_info
         }
-
-
-
-# """
-# Query Analyzer Node - Analyzes user queries to understand intent and information needs.
-
-# This node identifies:
-# 1. Case type (divorce, domestic violence, custody, etc.)
-# 2. Information already provided by the user
-# 3. Critical information still needed
-# """
-
-# from langchain_core.messages import HumanMessage, SystemMessage
-# from typing import Dict, List
-# from state import FamilyLawState
-# import os
-# import json
-# import logging
-# from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-
-# logger = logging.getLogger(__name__)
-
-# # Initialize LLM
-# llm = ChatHuggingFace(
-#     llm=HuggingFaceEndpoint(
-#         repo_id="meta-llama/Llama-3.1-8B-Instruct",
-#         huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_KEY"),
-#         task="text-generation",
-#     )
-# )
-
-# QUERY_ANALYSIS_PROMPT = """You are an expert Indian FAMILY LAW analyst. Analyze the user's query to understand their legal situation.
-
-# Your task is to:
-# 1. Identify the PRIMARY case type or intent, it can be divorce, domestic_violence, dowry, child_custody, maintenance, general, etc.,
-# 2. Extract what information the user HAS PROVIDED.
-# 3. Identify what CRITICAL information is STILL NEEDED to give proper legal advice, no assumptions.
-
-# RESPONSE FORMAT (Strictly JSON only, no other text):
-# {{
-#   "user_intent": "brief description of what user wants to achieve",
-#   "info_provided": {{
-#     "key1": "value1",
-#     "key2": "value2"
-#   }},
-#   "info_needed": [
-#     "specific_info_1",
-#     "specific_info_2"
-#   ],
-#   "has_sufficient_info": true/false
-# }}
-
-# RULES:
-# - If user provides comprehensive details, set "has_sufficient_info": true and "info_needed": []
-# - If critical information is missing, set "has_sufficient_info": false and list specific needs
-# - Extract dates, relationships, incidents from the query
-# - Be specific about what's needed (e.g., "marriage_date" not just "details")
-
-# USER QUERY:
-# {query}
-
-# ANALYSIS (JSON only):"""
-
-# def analyze_query(state: FamilyLawState) -> Dict:
-#     """
-#     Analyze the user's query to understand intent and information needs.
     
-#     Returns:
-#         Dict with:
-#         - case_type: str
-#         - info_provided: dict
-#         - info_needed: list
-#         - has_sufficient_info: bool
-#         - user_intent: str
-#     """
-#     query = state["query"]
-#     # messages = state.get("messages", [])
-    
-#     # Format conversation history
-#     history = ""
-#     # if messages:
-#     #     recent_messages = messages[-4:]  # Last 2 exchanges
-#     #     history_lines = []
-#     #     for msg in recent_messages:
-#     #         role = "User" if msg.__class__.__name__ == "HumanMessage" else "Assistant"
-#     #         history_lines.append(f"{role}: {msg.content[:150]}")
-#     #     history = "\n".join(history_lines)
-#     # else:
-#     #     history = "No previous conversation."
-    
-#     # Prepare prompt
-#     prompt = QUERY_ANALYSIS_PROMPT.format(
-#         query=query,
-#     )
-    
-#     try:
-#         # Get LLM analysis
-#         conversation = [
-#             SystemMessage(content="You are a legal query analyzer. Respond ONLY with valid JSON."),
-#             HumanMessage(content=prompt)
-#         ]
-#         logger.info("Invoking LLM for query analysis")
-#         response = llm.invoke(conversation)
-#         response_text = response.content.strip()
-        
-#         # Extract JSON from response
-#         # Sometimes LLM adds markdown backticks
-#         if "```json" in response_text:
-#             response_text = response_text.split("```json")[1].split("```")[0].strip()
-#         elif "```" in response_text:
-#             response_text = response_text.split("```")[1].split("```")[0].strip()
-        
-#         # Parse JSON
-#         analysis = json.loads(response_text)
-        
-#         # Validate and set defaults
-#         # case_type = analysis.get("case_type", "general")
-#         info_provided = analysis.get("info_provided", {})
-#         info_needed = analysis.get("info_needed", [])
-#         has_sufficient_info = analysis.get("has_sufficient_info", False)
-#         user_intent = analysis.get("user_intent", "Seeking legal advice")
-        
-#         logger.info(f"Query analysis: sufficient_info={has_sufficient_info}, needs={len(info_needed)} items")
-        
-#         # Safety check for domestic violence
-#         # if case_type == "domestic_violence":
-#         #     if "current_safety_status" not in info_provided and "safety" not in " ".join(info_needed).lower():
-#         #         info_needed.insert(0, "current_safety_status")
-#         #         has_sufficient_info = False
-        
-#         return {
-#             # "case_type": case_type,
-#             "info_collected": info_provided,
-#             "info_needed_list": info_needed,
-#             "has_sufficient_info": has_sufficient_info,
-#             "user_intent": user_intent
-#         }
-    
-#     except json.JSONDecodeError as e:
-#         logger.error(f"JSON parsing error: {str(e)}\nResponse: {response_text[:200]}")
-#         # Fallback: basic keyword analysis
-#         return fallback_analysis(query)
-    
-#     except Exception as e:
-#         logger.error(f"Query analysis error: {str(e)}")
-#         return fallback_analysis(query)
-
-# def fallback_analysis(query: str) -> Dict:
-#     """
-#     Fallback keyword-based analysis if LLM fails.
-#     """
-#     query_lower = query.lower()
-    
-#     # Determine case type
-#     if any(word in query_lower for word in ["violence", "abuse", "beat", "assault", "hit", "threat"]):
-#         case_type = "domestic_violence"
-#     elif any(word in query_lower for word in ["dowry", "dahej", "demand", "harassment"]):
-#         case_type = "dowry"
-#     elif any(word in query_lower for word in ["custody", "children", "child", "visitation"]):
-#         case_type = "child_custody"
-#     elif any(word in query_lower for word in ["divorce", "separation", "marriage"]):
-#         case_type = "divorce"
-#     elif any(word in query_lower for word in ["maintenance", "alimony", "support"]):
-#         case_type = "maintenance"
-#     else:
-#         case_type = "general"
-    
-#     # Basic information extraction
-#     info_provided = {}
-#     if "married" in query_lower or "marriage" in query_lower:
-#         info_provided["marriage_mentioned"] = "yes"
-#     if "child" in query_lower:
-#         info_provided["children_mentioned"] = "yes"
-    
-#     # Determine if we need more info
-#     has_sufficient_info = len(query.split()) > 30  # If query is detailed
-    
-#     info_needed = []
-#     if not has_sufficient_info:
-#         if case_type == "divorce":
-#             info_needed = ["marriage_date", "grounds_for_divorce", "children_details"]
-#         elif case_type == "domestic_violence":
-#             info_needed = ["current_safety_status", "incident_details", "relationship_to_perpetrator"]
-#         elif case_type == "child_custody":
-#             info_needed = ["children_ages", "current_custody_arrangement"]
-#         else:
-#             info_needed = ["detailed_situation", "timeline_of_events"]
-    
-#     logger.info(f"Fallback analysis: case_type={case_type}")
-    
-#     return {
-#         "case_type": case_type,
-#         "info_collected": info_provided,
-#         "info_needed_list": info_needed,
-#         "has_sufficient_info": has_sufficient_info,
-#         "user_intent": "Seeking legal advice"
-#     }
+    def _get_case_specific_needs(self, case_type: str) -> List[str]:
+        """Get case-specific information needs."""
+        needs_map = {
+            "divorce": ["marriage_date", "grounds_for_divorce", "children_details", "property_details"],
+            "domestic_violence": ["current_safety_status", "incident_details", "relationship_to_perpetrator", "previous_complaints"],
+            "child_custody": ["children_ages", "current_custody_arrangement", "reason_for_custody_change"],
+            "dowry": ["marriage_date", "dowry_demands_details", "evidence_available", "complaints_filed"],
+            "maintenance": ["marriage_duration", "income_details", "dependents", "current_financial_status"],
+            "general": ["detailed_situation", "timeline_of_events", "desired_outcome"]
+        }
+        return needs_map.get(case_type, needs_map["general"])
