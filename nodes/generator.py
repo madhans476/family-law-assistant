@@ -29,23 +29,54 @@ llm = ChatHuggingFace(
     )
 )
 
-SYSTEM_PROMPT = """You are a senior Indian family law attorney with 20+ years of experience. 
-Provide clear, actionable legal advice based on case information and relevant legal precedents.
+example_query = ("I got engaged in June 2018 and married in February 2019. Soon after, my husband stopped caring for me and the household, then left. "
+"He abused me for talking to friends and about my past, which he already knew. Yesterday, he called me to meet, and I hoped we could reconcile. "
+"Instead, he beat me and stopped me from leaving. I escaped this morning. I want a divorce as soon as possible.")
 
-GUIDELINES:
-1. Provide practical, step-by-step advice
-2. Reference relevant Indian laws, sections, and precedents
-3. Explain legal terms simply (Flesch Reading Ease ≥ 55)
-4. Be empathetic and professional
-5. Prioritize safety in domestic violence cases
-6. Structure response with clear sections:
-   - Immediate Actions
-   - Legal Options Available
-   - Relevant Laws & Precedents
-   - Next Steps
-7. Only use provided context - never make up information
+example_responses = [
+"First, lodge an FIR under Section 498A for cruelty. Then consult a lawyer to file two cases: one under the Domestic Violence Act, and another for Judicial Separation under Section 10 of the Hindu Marriage Act, since you can’t seek divorce before one year of marriage.",
+"You can file for divorce in family court under the Hindu Marriage Act on grounds of mental and physical cruelty. Also, register an FIR under Sections 498A and 323 IPC.",
+"Since you married in February 2019, you must wait one year before filing for divorce. Meanwhile, file a police complaint for assault — it will support your case for cruelty. You can also claim maintenance under Section 125 CrPC if he isn’t supporting you."
+]
 
-IMPORTANT: Keep your response complete and comprehensive. Do not truncate."""
+SYSTEM_PROMPT = (
+"You are a senior Indian law analyst. Follow the guidelines strictly. "
+"Explain legal issues in simple, plain English that anyone can understand. Use a warm, professional tone, and avoid robotic phrasing. "
+"Do not include reasoning scaffolds, JSON, or any pre/post text.\n\n"
+"Guidelines:\n"
+"- Internally reason as Issue → Rule (statute/precedent) → Application → Conclusion, but only output the detailed final answer.\n"
+"- Prefer authoritative Indian sources and cite succinctly, e.g., (IPC s.498A), (HMA 1955 s.13), (CrPC s.125).\n"
+"- If a precise section is uncertain, mention it briefly without guessing.\n"
+"- Give concise response to ensure a Flesch Reading Ease score of atleast 55+.\n"
+"- Explain legal terms briefly in everyday language when necessary.\n"
+"- Give practical guidance wherever possible, focusing on what a person can realistically do.\n\n"
+"Style Example (tone only, not ground truth):\n"
+f"Query:\n{example_query}\n\n"
+"Example Responses:\n"
+f"1. {example_responses[0]}\n"
+f"2. {example_responses[1]}\n"
+f"3. {example_responses[2]}\n"
+
+)
+
+
+# SYSTEM_PROMPT = """You are a senior Indian family law attorney with 20+ years of experience. 
+# Provide clear, actionable legal advice based on case information and relevant legal precedents.
+
+# GUIDELINES:
+# 1. Provide practical, step-by-step advice
+# 2. Reference relevant Indian laws, sections, and precedents
+# 3. Explain legal terms simply (Flesch Reading Ease ≥ 55)
+# 4. Be empathetic and professional
+# 5. Prioritize safety in domestic violence cases
+# 6. Structure response with clear sections:
+#    - Immediate Actions
+#    - Legal Options Available
+#    - Relevant Laws & Precedents
+#    - Next Steps
+# 7. Only use provided context - never make up information
+
+# IMPORTANT: Keep your response complete and comprehensive. Do not truncate."""
 
 def format_context(retrieved_chunks: list) -> str:
     """Format retrieved chunks efficiently to save tokens."""
@@ -53,16 +84,14 @@ def format_context(retrieved_chunks: list) -> str:
         return "No relevant precedents found."
     
     context_parts = ["RELEVANT LEGAL PRECEDENTS:\n"]
-    
-    # Limit to top 3 most relevant to save tokens
-    for i, chunk in enumerate(retrieved_chunks[:3], 1):
+
+    # Limit to top 5 most relevant to save tokens
+    for i, chunk in enumerate(retrieved_chunks[:5], 1):
         context_parts.append(f"\n[Precedent {i}] ({chunk['score']:.0%} relevance)")
         context_parts.append(f"Title: {chunk['metadata']['title']}")
         context_parts.append(f"Category: {chunk['metadata']['category']}")
-        # Use first 400 chars instead of 500 to save tokens
-        content = chunk['content'][:400]
-        if len(chunk['content']) > 400:
-            content += "..."
+        # Use first 500 chars instead of 400 to save tokens
+        content = chunk['content']
         context_parts.append(f"Content: {content}")
         context_parts.append("")
     
@@ -106,12 +135,11 @@ def generate_response(state: FamilyLawState) -> Dict:
     # Build conversation - only include recent history to save tokens
     conversation = [SystemMessage(content=SYSTEM_PROMPT)]
     
-    # Only include last 2 exchanges to keep context manageable
     if messages:
         conversation.extend(messages[-4:])
     
     # Construct focused prompt
-    prompt = f"""Provide comprehensive legal advice based on the case information and precedents below.
+    prompt = f"""Provide complete legal advice (experienced lawyer) based on the case information and precedents below.
 
 {case_information}
 
@@ -120,12 +148,14 @@ def generate_response(state: FamilyLawState) -> Dict:
 CLIENT QUERY: {query}
 
 Provide a COMPLETE, well-structured response with:
-1. Immediate Actions (practical steps to take now)
-2. Legal Options Available (specific remedies under Indian law)
-3. Relevant Laws & Precedents (cite sections and acts)
-4. Next Steps (clear action plan)
+- Internally reason as Issue → Rule (statute/precedent) → Application → Conclusion, but only output the detailed final answer.
+- Prefer authoritative Indian sources and cite succinctly, e.g., (IPC s.498A), (HMA 1955 s.13), (CrPC s.125).
+- If a precise section is uncertain, mention it briefly without guessing.
+- Give concise response to ensure a Flesch Reading Ease score of atleast 55+.
+- Explain legal terms briefly in everyday language when necessary.
+- Give practical guidance wherever possible, focusing on what a person can realistically do.
 
-Use empathetic, simple language. Be thorough - this is important for the client's case.
+Use empathetic, professional, simple language. Be thorough - this is important for the client's case.
 
 YOUR COMPLETE RESPONSE:"""
     
