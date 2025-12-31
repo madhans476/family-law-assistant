@@ -1,7 +1,7 @@
 """
-LangGraph workflow with integrated debug logging.
+graph.py with proper logging configuration.
 
-The logging functions are called INSIDE the node functions, not as separate nodes.
+Make sure logging is configured in main.py BEFORE importing this module.
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -12,30 +12,24 @@ from nodes.retriever import retrieve_documents
 from nodes.generator import generate_response
 import logging
 
-# Import debug logging utilities
-from nodes.logs import log_state_transition, log_gathering_iteration
-
+# Get logger for this module
 logger = logging.getLogger(__name__)
 
 
 def analyze_query_node(state: FamilyLawState) -> FamilyLawState:
-    """
-    Analyze ONLY the initial query. Skip if in gathering phase.
-    """
-    # Save state before for logging
-    state_before = dict(state)
+    """Analyze ONLY the initial query. Skip if in gathering phase."""
     
     # CRITICAL: Don't analyze follow-up responses
     if state.get("in_gathering_phase", False):
-        logger.info("Skipping analysis - already in gathering phase")
+        logger.info("⏭️  Skipping analysis - already in gathering phase")
         return state
     
     if state.get("analysis_complete", False):
-        logger.info("Skipping analysis - already complete")
+        logger.info("⏭️  Skipping analysis - already complete")
         return state
     
     try:
-        logger.info("=== ANALYZING INITIAL QUERY ===")
+        logger.info("🔍 === ANALYZING INITIAL QUERY ===")
         agent = QueryAnalyzer()
         response = agent.analyze_query(state)
         
@@ -46,31 +40,32 @@ def analyze_query_node(state: FamilyLawState) -> FamilyLawState:
         state["info_collected"] = response.get("info_collected", {})
         state["analysis_complete"] = True
         
+        logger.info(f"   Intent: {state['user_intent']}")
+        logger.info(f"   Info collected: {list(state['info_collected'].keys())}")
+        logger.info(f"   Info needed: {state['info_needed_list']}")
+        
         # Check intent confidence
         intent_confidence = response.get("intent_confidence", "high")
         if intent_confidence == "low" or not response.get("user_intent"):
-            logger.info("Low confidence - requesting clarification")
+            logger.info("❓ Low confidence - requesting clarification")
             state["needs_clarification"] = True
-            state["clarification_question"] = "Could you please provide more details about your legal situation? For example, is this related to divorce, domestic violence, child custody, or another family law matter?"
+            state["clarification_question"] = "Could you please provide more details about your legal situation?"
         else:
             state["needs_clarification"] = False
             
             if not state["info_needed_list"]:
-                logger.info("No info needed - ready for retrieval")
+                logger.info("✅ No info needed - ready for retrieval")
                 state["has_sufficient_info"] = True
                 state["in_gathering_phase"] = False
             else:
-                logger.info(f"Need to gather {len(state['info_needed_list'])} items")
+                logger.info(f"📝 Need to gather {len(state['info_needed_list'])} items")
                 state["in_gathering_phase"] = True
                 state["gathering_step"] = 0
-        
-        # Log state transition
-        log_state_transition("analyze_query", state_before, state)
         
         return state
         
     except Exception as e:
-        logger.error(f"Query Analyzer failed: {e}")
+        logger.error(f"❌ Query Analyzer failed: {e}", exc_info=True)
         state["has_sufficient_info"] = True
         state["analysis_complete"] = True
         state["in_gathering_phase"] = False
@@ -78,25 +73,22 @@ def analyze_query_node(state: FamilyLawState) -> FamilyLawState:
 
 
 def gather_information_node(state: FamilyLawState) -> FamilyLawState:
-    """
-    Gather information iteratively with debug logging.
-    """
-    # Save state before for logging
-    state_before = dict(state)
+    """Gather information iteratively."""
     
     try:
-        # Log start of iteration
-        log_gathering_iteration(
-            state.get("gathering_step", 0),
-            state,
-            "START"
-        )
+        step = state.get("gathering_step", 0)
+        logger.info(f"📊 === GATHERING INFORMATION (Step {step}) ===")
+        logger.info(f"   Currently collected: {list(state.get('info_collected', {}).keys())}")
+        logger.info(f"   Still needed: {state.get('info_needed_list', [])}")
+        logger.info(f"   Messages count: {len(state.get('messages', []))}")
         
-        logger.info("=== GATHERING INFORMATION ===")
         gatherer = InformationGatherer()
         response = gatherer.gather_next_information(state)
         
         # CRITICAL: Update state with new values
+        old_collected = len(state.get("info_collected", {}))
+        old_needed = len(state.get("info_needed_list", []))
+        
         state["info_collected"] = response.get("info_collected", {})
         state["info_needed_list"] = response.get("info_needed_list", [])
         state["follow_up_question"] = response.get("follow_up_question")
@@ -104,26 +96,25 @@ def gather_information_node(state: FamilyLawState) -> FamilyLawState:
         state["gathering_step"] = response.get("gathering_step", 0)
         state["current_question_target"] = response.get("current_question_target")
         
+        new_collected = len(state["info_collected"])
+        new_needed = len(state["info_needed_list"])
+        
+        logger.info(f"   ✓ Collected: {old_collected} → {new_collected}")
+        logger.info(f"   ✓ Needed: {old_needed} → {new_needed}")
+        logger.info(f"   ✓ Current target: {state['current_question_target']}")
+        
         # Check completion
         if not state["needs_more_info"]:
-            logger.info("✓ Gathering complete!")
+            logger.info("✅ Gathering complete!")
             state["has_sufficient_info"] = True
             state["in_gathering_phase"] = False
-        
-        # Log end of iteration
-        log_gathering_iteration(
-            state.get("gathering_step", 0),
-            state,
-            "END"
-        )
-        
-        # Log state transition
-        log_state_transition("gather_information", state_before, state)
+        else:
+            logger.info(f"➡️  Asking next question about: {state['current_question_target']}")
         
         return state
         
     except Exception as e:
-        logger.error(f"Information Gatherer failed: {e}")
+        logger.error(f"❌ Information Gatherer failed: {e}", exc_info=True)
         state["has_sufficient_info"] = True
         state["in_gathering_phase"] = False
         state["needs_more_info"] = False
@@ -133,17 +124,17 @@ def gather_information_node(state: FamilyLawState) -> FamilyLawState:
 def route_after_analysis(state: FamilyLawState) -> str:
     """Route after initial query analysis."""
     if state.get("needs_clarification", False):
-        logger.info("→ Routing to clarification")
+        logger.info("🔀 Routing → clarification")
         return "clarify"
     
     has_sufficient_info = state.get("has_sufficient_info", False)
     info_needed = state.get("info_needed_list", [])
     
     if has_sufficient_info or not info_needed:
-        logger.info("→ Routing to retrieval (sufficient info)")
+        logger.info("🔀 Routing → retrieval (sufficient info)")
         return "retrieve"
     else:
-        logger.info(f"→ Routing to gather_info (need {len(info_needed)} items)")
+        logger.info(f"🔀 Routing → gather_info (need {len(info_needed)} items)")
         return "gather_info"
 
 
@@ -152,10 +143,10 @@ def route_after_gathering(state: FamilyLawState) -> str:
     needs_more_info = state.get("needs_more_info", False)
     
     if needs_more_info:
-        logger.info("→ Routing to ask_question (more info needed)")
+        logger.info("🔀 Routing → ask_question (more info needed)")
         return "ask_question"
     else:
-        logger.info("→ Routing to retrieval (gathering complete)")
+        logger.info("🔀 Routing → retrieval (gathering complete)")
         return "retrieve"
 
 
@@ -165,6 +156,8 @@ def format_clarification_response(state: FamilyLawState) -> dict:
         "clarification_question",
         "Could you please clarify your legal situation?"
     )
+    
+    logger.info(f"❓ Sending clarification: {clarification[:100]}...")
     
     return {
         "response": clarification,
@@ -183,6 +176,9 @@ def format_follow_up_response(state: FamilyLawState) -> dict:
     info_collected = state.get("info_collected", {})
     info_needed = state.get("info_needed_list", [])
     
+    logger.info(f"📝 Asking follow-up: {follow_up[:100]}...")
+    logger.info(f"   Progress: {len(info_collected)} collected, {len(info_needed)} remaining")
+    
     return {
         "response": follow_up,
         "sources": [],
@@ -193,24 +189,21 @@ def format_follow_up_response(state: FamilyLawState) -> dict:
 
 
 def create_graph():
-    """
-    Create the family law assistant graph.
+    """Create the family law assistant graph."""
     
-    The debug logging is integrated INSIDE the node functions,
-    not added as separate workflow nodes.
-    """
+    logger.info("🏗️  Building LangGraph workflow...")
     
     workflow = StateGraph(FamilyLawState)
     
-    # Add nodes (logging is INSIDE these functions)
+    # Add nodes
     workflow.add_node("analyze_query", analyze_query_node)
     workflow.add_node("clarify", format_clarification_response)
-    workflow.add_node("gather_info", gather_information_node)  # Has logging inside
+    workflow.add_node("gather_info", gather_information_node)
     workflow.add_node("ask_question", format_follow_up_response)
     workflow.add_node("retrieve", retrieve_documents)
     workflow.add_node("generate", generate_response)
     
-    # Edges (same as before)
+    # Edges
     workflow.add_edge(START, "analyze_query")
     
     workflow.add_conditional_edges(
@@ -239,7 +232,7 @@ def create_graph():
     workflow.add_edge("generate", END)
     
     app = workflow.compile()
-    logger.info("✓ Graph compiled successfully with debug logging")
+    logger.info("✅ Graph compiled successfully")
     
     return app
 

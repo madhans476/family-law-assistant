@@ -24,19 +24,18 @@ class QueryAnalyzer:
     Analyzes user queries to understand intent, case type, and information needs.
     """
     
-    QUERY_ANALYSIS_PROMPT = """You are an expert Indian FAMILY LAW analyst. Analyze the user's query to understand their legal situation.
+    QUERY_ANALYSIS_PROMPT = """You are an expert Indian LAW analyst. Analyze the user's query to understand their legal situation.
 
 Your task is to:
 1. Identify the PRIMARY legal intent (what they want help with)
 2. Assess confidence in understanding their intent (high/medium/low)
 3. Extract what information the user HAS PROVIDED
-4. Identify what CRITICAL information is STILL NEEDED
+4. Identify what CRITICAL information is STILL NEEDED to answer their query without making assumptions
 
 RESPONSE FORMAT (Strictly JSON only, no other text):
 {{
   "user_intent": "brief description of what user wants to achieve",
   "intent_confidence": "high|medium|low",
-  "case_type": "divorce|domestic_violence|dowry|child_custody|maintenance|general",
   "info_provided": {{
     "key1": "value1",
     "key2": "value2"
@@ -115,7 +114,6 @@ ANALYSIS (JSON only):"""
             # Validate and set defaults
             user_intent = analysis.get("user_intent", "")
             intent_confidence = analysis.get("intent_confidence", "medium")
-            case_type = analysis.get("case_type", "general")
             info_provided = analysis.get("info_provided", {})
             info_needed = analysis.get("info_needed", [])
             
@@ -123,12 +121,11 @@ ANALYSIS (JSON only):"""
             has_sufficient_info = len(info_needed) == 0 and len(info_provided) > 0
             
             logger.info(f"Query analysis: intent_confidence={intent_confidence}, "
-                       f"case_type={case_type}, needs={len(info_needed)} items")
+                       f"user_type={user_intent}, needs={len(info_needed)} items")
             
             return {
                 "user_intent": user_intent,
                 "intent_confidence": intent_confidence,
-                "case_type": case_type,
                 "info_collected": info_provided,
                 "info_needed_list": info_needed,
                 "has_sufficient_info": has_sufficient_info
