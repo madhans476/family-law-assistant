@@ -63,6 +63,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+
 # Initialize settings
 settings = get_settings()
 
@@ -169,7 +170,8 @@ def save_history(conversation_id: str, messages: List, state: dict) -> bool:
                 "analysis_complete": state.get("analysis_complete", False),
                 "has_sufficient_info": state.get("has_sufficient_info", False),
                 "current_question_target": state.get("current_question_target"),
-                "message_type": state.get("message_type")
+                "message_type": state.get("message_type"),
+                "last_response": state.get("response", "")
             },
             "last_updated": datetime.now().isoformat()
         }
@@ -209,6 +211,10 @@ async def health_check():
         "version": "2.1.0"
     }
 
+@app.options("/chat/stream")
+async def chat_stream_options():
+    return {}
+
 @app.post("/chat/stream")
 @limiter.limit(f"{settings.rate_limit_per_minute}/minute")
 async def chat_stream(request: Request, query_request: QueryRequest):
@@ -239,7 +245,8 @@ async def chat_stream(request: Request, query_request: QueryRequest):
                 "conversation_id": conversation_id,
                 
                 # Restore previous state
-                "user_intent": previous_state.get("user_intent"),
+                "root_query": previous_state.get("root_query", ""),
+                "user_intent": previous_state.get("user_intent", ""),
                 "analysis_complete": previous_state.get("analysis_complete", False),
                 "needs_clarification": False,
                 "clarification_question": None,
@@ -253,6 +260,7 @@ async def chat_stream(request: Request, query_request: QueryRequest):
                 "follow_up_question": None,
                 "gathering_step": previous_state.get("gathering_step", 0),
                 "current_question_target": previous_state.get("current_question_target"),
+                "response": previous_state.get("last_response", ""),
                 
                 # Retrieval and generation
                 "retrieved_chunks": [],

@@ -12,7 +12,7 @@ from typing import Dict
 from state import FamilyLawState
 import os
 import logging
-
+from nodes.case_outcome_predictor import CaseOutcomePredictor
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
 logging.basicConfig(level=logging.INFO)
@@ -119,6 +119,7 @@ def generate_response(state: FamilyLawState) -> Dict:
     messages = state.get("messages", [])
     info_collected = state.get("info_collected", {})
     user_intent = state.get("user_intent", "legal advice")
+    include_prediction = state.get("include_prediction", True)
     
     # Validate we have information
     if not retrieved_chunks:
@@ -176,6 +177,28 @@ YOUR COMPLETE RESPONSE:"""
         if "not a substitute for legal advice" not in response_content.lower():
             response_content += "\n\n---\n**Disclaimer**: This information is for educational purposes only and does not constitute legal advice. Please consult with a qualified family law attorney for personalized legal guidance."
         
+        if include_prediction and info_collected and len(info_collected) >= 3:
+            try:
+                predictor = CaseOutcomePredictor()
+                prediction = predictor.predict_outcome(
+                    user_intent=state.get("user_intent", ""),
+                    info_collected=info_collected,
+                    retrieved_precedents=retrieved_chunks
+                )
+                
+                # Format and append
+                prediction_text = predictor.format_prediction_for_display(prediction)
+                response_content += "\n\n" + prediction_text
+                
+                # Store in state for frontend
+                state["prediction"] = {
+                    "probability_range": prediction.win_probability_range,
+                    "case_strength": prediction.case_strength.value,
+                    "confidence": prediction.confidence_level
+                }
+            except Exception as e:
+                logger.error(f"Prediction failed: {e}")
+
         logger.info(f"Generated response: {len(response_content)} characters")
         
         return {

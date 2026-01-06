@@ -67,3 +67,5 @@ docker-compose.override.yml
 chat_history/
 
 volumes/
+
+logs/

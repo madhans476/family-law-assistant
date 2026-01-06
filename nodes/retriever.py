@@ -1,3 +1,4 @@
+from logging import root
 from pymilvus import connections, Collection
 from sentence_transformers import SentenceTransformer
 from typing import Dict
@@ -31,8 +32,13 @@ def retrieve_documents(state: FamilyLawState) -> Dict:
     """
     Retrieve relevant documents from Milvus based on the query.
     """
-    query = state["query"]
-    
+    # Replace line 34 with this:
+    root = state.get("root_query") or ""
+    query = state.get("query") or ""
+    combined_query = root + query
+
+    query = combined_query
+
     if not collection:
         return {
             "retrieved_chunks": [],

@@ -9,6 +9,8 @@ Key fixes:
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict, List
+
+from numpy import info
 from state import FamilyLawState
 import os
 import json
@@ -23,7 +25,7 @@ class InformationGatherer:
     Gathers information iteratively through targeted questions.
     """
     
-    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian Family Law attorney conducting a client consultation.
+    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian Law attorney conducting a client consultation.
 
 SITUATION:
 - User Intent: {user_intent}
@@ -124,6 +126,7 @@ EXTRACTED ANSWER:"""
                     logger.info(f"✓ Stored answer for: {current_target}")
                     logger.info(f"Updated needed list: {info_needed_list}")
                 else:
+                    info_collected["additional_info"] = last_user_msg.content.strip() + info_collected.get("additional_info", "") 
                     logger.warning(f"User didn't provide {current_target}, keeping in list")
         
         # STEP 2: Check if we're done
@@ -156,7 +159,7 @@ EXTRACTED ANSWER:"""
             "info_collected": info_collected,
             "info_needed_list": info_needed_list,
             "gathering_step": gathering_step + 1,
-            "current_question_target": next_target  # Store what we're asking about
+            "current_question_target": next_target
         }
     
     def _generate_question(
@@ -180,7 +183,7 @@ EXTRACTED ANSWER:"""
         
         try:
             conversation = [
-                SystemMessage(content="You are an empathetic family law attorney. Ask ONE focused question."),
+                SystemMessage(content="You are an empathetic law attorney. Ask ONE focused question."),
                 HumanMessage(content=prompt)
             ]
             
