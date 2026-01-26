@@ -1,12 +1,12 @@
 """
-Enhanced state.py with support for updates, re-validation, and predictions.
+Enhanced state.py with reasoning and explanation support.
 """
 
-from typing import TypedDict, List, Dict, Optional, Literal, Tuple
+from typing import TypedDict, List, Dict, Optional, Literal, Tuple, Any
 from langgraph.graph import MessagesState
 
 class FamilyLawState(MessagesState):
-    """Enhanced state for the family law assistant graph with full feature support."""
+    """Enhanced state for the family law assistant graph with explainability features."""
     
     # User query
     query: str
@@ -33,9 +33,9 @@ class FamilyLawState(MessagesState):
     revalidation_count: int = 0
     
     # Update/correction handling
-    is_update: bool = False  # Flag when user is updating/correcting info
+    is_update: bool = False
     update_type: Optional[Literal["correction", "addition", "clarification"]] = None
-    previous_response_id: Optional[str] = None  # Track which response user is updating
+    previous_response_id: Optional[str] = None
     
     # Retrieval results
     retrieved_chunks: List[Dict] = []
@@ -43,9 +43,14 @@ class FamilyLawState(MessagesState):
     # Generated response
     response: str = ""
     
+    # Explainability features
+    reasoning_steps: List[Dict[str, Any]] = []  # Chain of reasoning
+    precedent_explanations: List[Dict[str, Any]] = []  # Why each precedent matters
+    include_reasoning: bool = True  # Whether to generate reasoning
+    
     # Outcome prediction
-    prediction: Optional[Dict] = None  # Stores prediction results
-    include_prediction: bool = True  # Whether to include prediction in response
+    prediction: Optional[Dict] = None
+    include_prediction: bool = True
     
     # Metadata
     sources: List[Dict] = []

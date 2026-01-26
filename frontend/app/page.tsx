@@ -1,7 +1,7 @@
-"use client";
+'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Trash2, Plus, Scale, BookOpen, Loader2, MessageSquare, ExternalLink, FileText, AlertCircle, CheckCircle, Clock, Info } from 'lucide-react';
+import { Send, Trash2, Plus, Scale, BookOpen, Loader2, MessageSquare, ExternalLink, FileText, AlertCircle, CheckCircle, Clock, Info, Brain, Lightbulb, ChevronDown, ChevronUp, Edit2, Check, X } from 'lucide-react';
 
 // Types
 interface Message {
@@ -11,6 +11,28 @@ interface Message {
   messageType?: 'clarification' | 'information_gathering' | 'final_response';
   infoCollected?: Record<string, string>;
   infoNeeded?: string[];
+  reasoningSteps?: ReasoningStep[];
+  precedentExplanations?: PrecedentExplanation[];
+}
+
+interface ReasoningStep {
+  step_number: number;
+  step_type: string;
+  title: string;
+  explanation: string;
+  confidence: number;
+  supporting_sources: string[];
+  legal_provisions: string[];
+}
+
+interface PrecedentExplanation {
+  precedent_title: string;
+  similarity_score: number;
+  matching_factors: string[];
+  different_factors: string[];
+  key_excerpt: string;
+  relevance_explanation: string;
+  citation: string;
 }
 
 interface Source {
@@ -25,6 +47,7 @@ interface Conversation {
   message_count: number;
   status: 'analyzing' | 'gathering_info' | 'completed';
   user_intent: string;
+  has_reasoning: boolean;
 }
 
 const LegalAssistChat: React.FC = () => {
@@ -35,9 +58,12 @@ const LegalAssistChat: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [sources, setSources] = useState<Source[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
-  const [currentMessageType, setCurrentMessageType] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conversationStatus, setConversationStatus] = useState<string>('ready');
+  const [infoCollected, setInfoCollected] = useState<Record<string, string>>({});
+  const [infoNeeded, setInfoNeeded] = useState<string[]>([]);
+  const [editingInfo, setEditingInfo] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   
@@ -82,6 +108,8 @@ const LegalAssistChat: React.FC = () => {
     setStreamingMessage('');
     setError(null);
     setInput('');
+    setInfoCollected({});
+    setInfoNeeded([]);
     setConversationStatus('ready');
   };
 
@@ -101,8 +129,9 @@ const LegalAssistChat: React.FC = () => {
       }));
       setMessages(formattedMessages);
       setSources([]);
+      setInfoCollected(data.state?.info_collected || {});
+      setInfoNeeded(data.state?.info_needed || []);
       
-      // Set status based on state
       const state = data.state || {};
       if (state.has_sufficient_info) {
         setConversationStatus('completed');
@@ -130,12 +159,24 @@ const LegalAssistChat: React.FC = () => {
         setMessages([]);
         setSources([]);
         setStreamingMessage('');
+        setInfoCollected({});
+        setInfoNeeded([]);
         setConversationStatus('ready');
       }
     } catch (err) {
       console.error('Failed to delete thread:', err);
       setError('Unable to delete conversation');
     }
+  };
+
+  const updateCollectedInfo = async (key: string, newValue: string) => {
+    const updatedInfo = { ...infoCollected, [key]: newValue };
+    setInfoCollected(updatedInfo);
+    setEditingInfo(null);
+    
+    // Send correction to backend
+    const correctionMessage = `I need to correct the ${key.replace('_', ' ')}: it should be "${newValue}"`;
+    sendMessage(correctionMessage);
   };
 
   const sendMessage = async (text: string = input) => {
@@ -157,7 +198,6 @@ const LegalAssistChat: React.FC = () => {
     setStreamingMessage('');
     setSources([]);
     setError(null);
-    setCurrentMessageType(null);
 
     try {
       const response = await fetch(`${API_BASE}/chat/stream`, {
@@ -165,7 +205,9 @@ const LegalAssistChat: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           query: text, 
-          conversation_id: threadId 
+          conversation_id: threadId,
+          include_reasoning: true,
+          include_prediction: true
         })
       });
 
@@ -179,8 +221,8 @@ const LegalAssistChat: React.FC = () => {
       const decoder = new TextDecoder();
       let accumulatedText = '';
       let messageType: string | null = null;
-      let infoCollected: Record<string, string> = {};
-      let infoNeeded: string[] = [];
+      let reasoningSteps: ReasoningStep[] = [];
+      let precedentExplanations: PrecedentExplanation[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -195,27 +237,28 @@ const LegalAssistChat: React.FC = () => {
               const data = JSON.parse(line.slice(6));
               
               if (data.type === 'clarification') {
-                // Clarification question received
                 accumulatedText = data.content;
                 messageType = 'clarification';
                 setStreamingMessage(accumulatedText);
                 setConversationStatus('clarifying');
               } else if (data.type === 'information_gathering') {
-                // Information gathering question
                 accumulatedText = data.content;
                 messageType = 'information_gathering';
-                infoCollected = data.info_collected || {};
-                infoNeeded = data.info_needed || [];
+                setInfoCollected(data.info_collected || {});
+                setInfoNeeded(data.info_needed || []);
                 setStreamingMessage(accumulatedText);
                 setConversationStatus('gathering_info');
               } else if (data.type === 'token') {
-                // Streaming final response
                 accumulatedText += data.content;
                 messageType = 'final_response';
                 setStreamingMessage(accumulatedText);
                 setConversationStatus('generating');
               } else if (data.type === 'sources') {
                 setSources(data.sources || []);
+              } else if (data.type === 'reasoning') {
+                reasoningSteps = data.steps || [];
+              } else if (data.type === 'precedent_explanations') {
+                precedentExplanations = data.explanations || [];
               } else if (data.type === 'done') {
                 messageType = data.message_type || 'final_response';
                 if (accumulatedText) {
@@ -223,7 +266,9 @@ const LegalAssistChat: React.FC = () => {
                     role: 'assistant', 
                     content: accumulatedText,
                     timestamp: new Date(),
-                    messageType: messageType as any
+                    messageType: messageType as any,
+                    reasoningSteps: data.reasoning_steps || reasoningSteps,
+                    precedentExplanations: data.precedent_explanations || precedentExplanations
                   };
                   
                   if (messageType === 'information_gathering') {
@@ -235,7 +280,6 @@ const LegalAssistChat: React.FC = () => {
                 }
                 setStreamingMessage('');
                 
-                // Update status
                 if (messageType === 'final_response') {
                   setConversationStatus('completed');
                 } else if (messageType === 'information_gathering') {
@@ -299,6 +343,8 @@ const LegalAssistChat: React.FC = () => {
       case 'analyzing': return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
       case 'gathering_info': return 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30';
       case 'completed': return 'bg-green-500/20 text-green-300 border-green-500/30';
+      case 'clarifying': return 'bg-orange-500/20 text-orange-300 border-orange-500/30';
+      case 'generating': return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
       default: return 'bg-gray-500/20 text-gray-300 border-gray-500/30';
     }
   };
@@ -308,6 +354,8 @@ const LegalAssistChat: React.FC = () => {
       case 'analyzing': return <Loader2 className="w-4 h-4 animate-spin" />;
       case 'gathering_info': return <Info className="w-4 h-4" />;
       case 'completed': return <CheckCircle className="w-4 h-4" />;
+      case 'clarifying': return <AlertCircle className="w-4 h-4" />;
+      case 'generating': return <Loader2 className="w-4 h-4 animate-spin" />;
       default: return <Clock className="w-4 h-4" />;
     }
   };
@@ -317,8 +365,258 @@ const LegalAssistChat: React.FC = () => {
       case 'analyzing': return 'Analyzing';
       case 'gathering_info': return 'Gathering Info';
       case 'completed': return 'Completed';
+      case 'clarifying': return 'Clarifying';
+      case 'generating': return 'Generating';
       default: return 'Ready';
     }
+  };
+
+  const getConfidenceColor = (confidence: number): string => {
+    if (confidence >= 0.85) return 'text-green-400';
+    if (confidence >= 0.70) return 'text-yellow-400';
+    return 'text-orange-400';
+  };
+
+  const getConfidenceEmoji = (confidence: number): string => {
+    if (confidence >= 0.85) return '🟢';
+    if (confidence >= 0.70) return '🟡';
+    return '🟠';
+  };
+
+  const ReasoningStepCard: React.FC<{ step: ReasoningStep; index: number }> = ({ step, index }) => {
+    const [expanded, setExpanded] = useState(index === 0);
+    
+    return (
+      <div className="bg-slate-800/50 rounded-lg border border-blue-500/20 overflow-hidden">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center justify-between p-4 hover:bg-slate-700/30 transition-colors"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-blue-400 font-semibold">Step {step.step_number}</span>
+            <span className="text-white font-medium">{step.title}</span>
+            <span className={`text-sm ${getConfidenceColor(step.confidence)}`}>
+              {getConfidenceEmoji(step.confidence)} {(step.confidence * 100).toFixed(0)}%
+            </span>
+          </div>
+          {expanded ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
+        </button>
+        
+        {expanded && (
+          <div className="p-4 pt-0 space-y-3">
+            <p className="text-gray-300">{step.explanation}</p>
+            
+            {step.legal_provisions.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {step.legal_provisions.map((provision, idx) => (
+                  <span key={idx} className="px-3 py-1 bg-blue-500/20 text-blue-300 rounded-full text-sm">
+                    📜 {provision}
+                  </span>
+                ))}
+              </div>
+            )}
+            
+            {step.supporting_sources.length > 0 && (
+              <div className="text-sm text-gray-400">
+                📚 Based on {step.supporting_sources.length} precedent(s)
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const PrecedentCard: React.FC<{ precedent: PrecedentExplanation; index: number }> = ({ precedent, index }) => {
+    const [expanded, setExpanded] = useState(false);
+    
+    return (
+      <div className="bg-slate-800/50 rounded-lg border border-purple-500/20 overflow-hidden">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center justify-between p-4 hover:bg-slate-700/30 transition-colors"
+        >
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            <span className="text-purple-400 font-semibold">#{index + 1}</span>
+            <span className="text-white font-medium truncate">{precedent.precedent_title}</span>
+            <span className="text-sm text-purple-300">
+              {(precedent.similarity_score * 100).toFixed(0)}% match
+            </span>
+          </div>
+          {expanded ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
+        </button>
+        
+        {expanded && (
+          <div className="p-4 pt-0 space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-purple-300 mb-2">Why This Matters:</h4>
+              <p className="text-gray-300 text-sm">{precedent.relevance_explanation}</p>
+            </div>
+            
+            {precedent.matching_factors.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold text-green-300 mb-2">✓ Similarities:</h4>
+                <ul className="space-y-1">
+                  {precedent.matching_factors.map((factor, idx) => (
+                    <li key={idx} className="text-sm text-gray-300 flex items-start gap-2">
+                      <CheckCircle className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                      <span>{factor}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            
+            {precedent.different_factors.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold text-orange-300 mb-2">⚠ Differences:</h4>
+                <ul className="space-y-1">
+                  {precedent.different_factors.map((factor, idx) => (
+                    <li key={idx} className="text-sm text-gray-300 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                      <span>{factor}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            
+            {precedent.key_excerpt && (
+              <div className="bg-slate-900/50 p-3 rounded-lg border-l-4 border-purple-500">
+                <p className="text-sm text-gray-300 italic">"{precedent.key_excerpt}"</p>
+              </div>
+            )}
+            
+            {precedent.citation && (
+              <a
+                href={precedent.citation}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 text-purple-400 hover:text-purple-300 text-sm"
+              >
+                <ExternalLink className="w-4 h-4" />
+                View Full Precedent
+              </a>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const InfoCollectedPanel: React.FC = () => {
+    if (Object.keys(infoCollected).length === 0) return null;
+    
+    const collected = Object.keys(infoCollected).length;
+    const needed = infoNeeded.length;
+    const total = collected + needed;
+    
+    return (
+      <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 border border-blue-500/30 rounded-xl p-5 mb-4">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Info className="w-5 h-5 text-blue-400" />
+            <h3 className="text-white font-semibold">Information I've Collected</h3>
+            <span className="text-xs text-gray-400">Click to edit if incorrect</span>
+          </div>
+          
+          {total > 0 && (
+            <div className={`px-3 py-1 rounded-lg border ${getStatusColor(conversationStatus)}`}>
+              <div className="flex items-center gap-2">
+                {getStatusIcon(conversationStatus)}
+                <span className="text-xs font-medium">{collected}/{total} Complete</span>
+              </div>
+            </div>
+          )}
+        </div>
+        
+        {/* Progress Bar */}
+        {total > 0 && (
+          <div className="mb-4">
+            <div className="flex justify-between text-xs text-gray-400 mb-2">
+              <span>Collected: {collected}</span>
+              <span>Remaining: {needed}</span>
+            </div>
+            <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-blue-400 h-3 rounded-full transition-all duration-500 ease-out relative"
+                style={{ width: `${(collected / total) * 100}%` }}
+              >
+                <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {Object.entries(infoCollected).map(([key, value]) => (
+            <div key={key} className="bg-slate-800/30 rounded-lg p-3 group">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-blue-300 mb-1">
+                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                  </div>
+                  {editingInfo === key ? (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        className="flex-1 px-2 py-1 bg-slate-700 text-white rounded text-sm"
+                        autoFocus
+                      />
+                      <button
+                        onClick={() => updateCollectedInfo(key, editValue)}
+                        className="p-1 bg-green-500 hover:bg-green-600 rounded"
+                      >
+                        <Check className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => setEditingInfo(null)}
+                        className="p-1 bg-red-500 hover:bg-red-600 rounded"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-white text-sm truncate">{value}</div>
+                  )}
+                </div>
+                {editingInfo !== key && (
+                  <button
+                    onClick={() => {
+                      setEditingInfo(key);
+                      setEditValue(value);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-slate-700 rounded"
+                  >
+                    <Edit2 className="w-4 h-4 text-gray-400" />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {/* Info Needed Section */}
+        {infoNeeded.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-blue-500/20">
+            <h4 className="text-sm font-semibold text-yellow-300 mb-2 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              Still Need to Know:
+            </h4>
+            <ul className="space-y-1">
+              {infoNeeded.map((item, idx) => (
+                <li key={idx} className="text-sm text-gray-300 flex items-start gap-2">
+                  <span className="text-yellow-400">•</span>
+                  <span>{item.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const renderInfoProgress = (msg: Message) => {
@@ -399,6 +697,9 @@ const LegalAssistChat: React.FC = () => {
                       <p className="text-white font-medium text-sm truncate">
                         {thread.user_intent || 'New Case'}
                       </p>
+                      {thread.has_reasoning && (
+                        <Brain className="w-4 h-4 text-purple-400" title="Has reasoning explanation" />
+                      )}
                     </div>
                     <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs mb-2 ${getStatusColor(thread.status)}`}>
                       {getStatusIcon(thread.status)}
@@ -434,7 +735,7 @@ const LegalAssistChat: React.FC = () => {
             <div className="flex-1">
               <h2 className="text-white font-semibold text-lg">AI Legal Consultation</h2>
               <p className="text-sm text-gray-400 mt-1">
-                Intelligent information gathering • Step-by-step guidance
+                Transparent reasoning • Precedent analysis • Step-by-step guidance
               </p>
             </div>
             {currentThreadId && (
@@ -459,6 +760,8 @@ const LegalAssistChat: React.FC = () => {
             </div>
           )}
 
+          <InfoCollectedPanel />
+
           {messages.length === 0 && !streamingMessage && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-2xl px-6">
@@ -467,7 +770,7 @@ const LegalAssistChat: React.FC = () => {
                 </div>
                 <h3 className="text-2xl font-bold text-white mb-3">Welcome to Your Legal Assistant</h3>
                 <p className="text-gray-300 mb-6">
-                  I'll guide you through an intelligent conversation to understand your situation before providing legal advice.
+                  I'll provide transparent, explainable legal advice with clear reasoning and precedent analysis.
                 </p>
               </div>
             </div>
@@ -478,39 +781,67 @@ const LegalAssistChat: React.FC = () => {
               key={idx}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
             >
-              <div
-                className={`max-w-3xl ${
-                  msg.role === 'user'
-                    ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white'
-                    : msg.messageType === 'clarification'
-                    ? 'bg-yellow-500/10 border-2 border-yellow-500/30 text-gray-100'
-                    : msg.messageType === 'information_gathering'
-                    ? 'bg-blue-500/10 border-2 border-blue-500/30 text-gray-100'
-                    : 'bg-slate-800/50 backdrop-blur-sm text-gray-100 border border-blue-500/10'
-                } rounded-2xl shadow-lg overflow-hidden`}
-              >
-                <div className="px-6 py-4">
-                  {msg.messageType === 'clarification' && (
-                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-yellow-500/20">
-                      <AlertCircle className="w-4 h-4 text-yellow-400" />
-                      <span className="text-xs font-semibold text-yellow-300 uppercase">Need Clarification</span>
+              <div className="max-w-4xl w-full">
+                <div
+                  className={`${
+                    msg.role === 'user'
+                      ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white ml-auto max-w-3xl'
+                      : msg.messageType === 'clarification'
+                      ? 'bg-yellow-500/10 border-2 border-yellow-500/30 text-gray-100'
+                      : msg.messageType === 'information_gathering'
+                      ? 'bg-blue-500/10 border-2 border-blue-500/30 text-gray-100'
+                      : 'bg-slate-800/50 backdrop-blur-sm text-gray-100 border border-blue-500/10'
+                  } rounded-2xl shadow-lg overflow-hidden`}
+                >
+                  <div className="px-6 py-4">
+                    {msg.messageType === 'clarification' && (
+                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-yellow-500/20">
+                        <AlertCircle className="w-4 h-4 text-yellow-400" />
+                        <span className="text-xs font-semibold text-yellow-300 uppercase">Need Clarification</span>
+                      </div>
+                    )}
+                    {msg.messageType === 'information_gathering' && (
+                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-blue-500/20">
+                        <Info className="w-4 h-4 text-blue-400" />
+                        <span className="text-xs font-semibold text-blue-300 uppercase">Gathering Information</span>
+                      </div>
+                    )}
+                    <div
+                      dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
+                      className="prose prose-invert max-w-none"
+                    />
+                    {renderInfoProgress(msg)}
+                  </div>
+                  {msg.timestamp && (
+                    <div className="px-6 py-2 border-t border-white/10 bg-black/10">
+                      <p className="text-xs opacity-75">{formatTime(msg.timestamp)}</p>
                     </div>
                   )}
-                  {msg.messageType === 'information_gathering' && (
-                    <div className="flex items-center gap-2 mb-2 pb-2 border-b border-blue-500/20">
-                      <Info className="w-4 h-4 text-blue-400" />
-                      <span className="text-xs font-semibold text-blue-300 uppercase">Gathering Information</span>
-                    </div>
-                  )}
-                  <div
-                    dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
-                    className="prose prose-invert max-w-none"
-                  />
-                  {renderInfoProgress(msg)}
                 </div>
-                {msg.timestamp && (
-                  <div className="px-6 py-2 border-t border-white/10 bg-black/10">
-                    <p className="text-xs opacity-75">{formatTime(msg.timestamp)}</p>
+
+                {/* Reasoning Steps */}
+                {msg.reasoningSteps && msg.reasoningSteps.length > 0 && (
+                  <div className="mt-4 space-y-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Brain className="w-5 h-5 text-blue-400" />
+                      <h3 className="text-white font-semibold">How I Reached This Conclusion</h3>
+                    </div>
+                    {msg.reasoningSteps.map((step, stepIdx) => (
+                      <ReasoningStepCard key={stepIdx} step={step} index={stepIdx} />
+                    ))}
+                  </div>
+                )}
+
+                {/* Precedent Explanations */}
+                {msg.precedentExplanations && msg.precedentExplanations.length > 0 && (
+                  <div className="mt-4 space-y-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Lightbulb className="w-5 h-5 text-purple-400" />
+                      <h3 className="text-white font-semibold">Why These Precedents Matter</h3>
+                    </div>
+                    {msg.precedentExplanations.map((precedent, precIdx) => (
+                      <PrecedentCard key={precIdx} precedent={precedent} index={precIdx} />
+                    ))}
                   </div>
                 )}
               </div>

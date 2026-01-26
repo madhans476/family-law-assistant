@@ -1,11 +1,5 @@
 """
-Complete main.py with proper logging setup at the top.
-
-Key changes:
-1. Logging configured FIRST, before other imports
-2. Logs to both file and console
-3. Creates logs directory automatically
-4. Daily log rotation
+Updated main.py with explainable AI support - streaming reasoning and precedent explanations.
 """
 
 # ===== LOGGING SETUP - MUST BE FIRST =====
@@ -42,7 +36,7 @@ logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 logger.info("="*80)
-logger.info("FAMILY LAW ASSISTANT API STARTING")
+logger.info("FAMILY LAW ASSISTANT API STARTING WITH EXPLAINABLE AI")
 logger.info(f"Logging to: {log_filename}")
 logger.info("="*80)
 
@@ -63,7 +57,6 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-
 # Initialize settings
 settings = get_settings()
 
@@ -73,8 +66,8 @@ limiter = Limiter(key_func=get_remote_address)
 # Initialize FastAPI app
 app = FastAPI(
     title="Family Law Legal Assistant API",
-    description="AI-powered family law consultation system with iterative information gathering",
-    version="2.1.0",
+    description="AI-powered family law consultation with explainable reasoning",
+    version="2.2.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
@@ -99,6 +92,8 @@ logger.info(f"History directory: {settings.history_dir}")
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     conversation_id: Optional[str] = Field(None, max_length=100)
+    include_reasoning: bool = Field(default=True)
+    include_prediction: bool = Field(default=True)
     
     @validator('query')
     def validate_query(cls, v):
@@ -113,6 +108,8 @@ class ChatResponse(BaseModel):
     message_type: Optional[str] = None
     info_collected: Optional[dict] = None
     info_needed: Optional[List[str]] = None
+    reasoning_steps: Optional[List[dict]] = None
+    precedent_explanations: Optional[List[dict]] = None
 
 # Helper Functions
 def load_history(conversation_id: str) -> tuple:
@@ -143,7 +140,6 @@ def load_history(conversation_id: str) -> tuple:
     
     return [], {}
 
-
 def save_history(conversation_id: str, messages: List, state: dict) -> bool:
     """Save conversation history and state to local file."""
     try:
@@ -158,7 +154,7 @@ def save_history(conversation_id: str, messages: List, state: dict) -> bool:
                 }
                 serializable_messages.append(msg_dict)
         
-        # Save comprehensive state
+        # Save comprehensive state including reasoning
         data = {
             "messages": serializable_messages,
             "state": {
@@ -171,7 +167,10 @@ def save_history(conversation_id: str, messages: List, state: dict) -> bool:
                 "has_sufficient_info": state.get("has_sufficient_info", False),
                 "current_question_target": state.get("current_question_target"),
                 "message_type": state.get("message_type"),
-                "last_response": state.get("response", "")
+                "last_response": state.get("response", ""),
+                "reasoning_steps": state.get("reasoning_steps", []),
+                "precedent_explanations": state.get("precedent_explanations", []),
+                "follow_up_question": state.get("follow_up_question", None)
             },
             "last_updated": datetime.now().isoformat()
         }
@@ -192,13 +191,16 @@ async def root():
     logger.info("Root endpoint accessed")
     return {
         "name": "Family Law Legal Assistant API",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "status": "operational",
         "features": [
             "Iterative information gathering",
             "Intent clarification",
             "Multi-turn conversations",
-            "Streaming responses"
+            "Streaming responses",
+            "Explainable AI reasoning",
+            "Precedent similarity analysis",
+            "Transparent information tracking"
         ]
     }
 
@@ -208,7 +210,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.1.0"
+        "version": "2.2.0"
     }
 
 @app.options("/chat/stream")
@@ -218,7 +220,7 @@ async def chat_stream_options():
 @app.post("/chat/stream")
 @limiter.limit(f"{settings.rate_limit_per_minute}/minute")
 async def chat_stream(request: Request, query_request: QueryRequest):
-    """Streaming chat endpoint with proper message saving."""
+    """Streaming chat endpoint with reasoning and explanations."""
     
     async def event_generator():
         conversation_id = None
@@ -227,6 +229,7 @@ async def chat_stream(request: Request, query_request: QueryRequest):
             logger.info("="*80)
             logger.info(f"NEW REQUEST: {conversation_id}")
             logger.info(f"Query: {query_request.query}")
+            logger.info(f"Include Reasoning: {query_request.include_reasoning}")
             logger.info("="*80)
             
             # Load history and previous state
@@ -257,14 +260,19 @@ async def chat_stream(request: Request, query_request: QueryRequest):
                 "info_collected": previous_state.get("info_collected", {}),
                 "info_needed_list": previous_state.get("info_needed_list", []),
                 "needs_more_info": False,
-                "follow_up_question": None,
+                "follow_up_question": previous_state.get("follow_up_question", None),
                 "gathering_step": previous_state.get("gathering_step", 0),
                 "current_question_target": previous_state.get("current_question_target"),
                 "response": previous_state.get("last_response", ""),
                 
+                # Explainability features
+                "include_reasoning": query_request.include_reasoning,
+                "include_prediction": query_request.include_prediction,
+                "reasoning_steps": [],
+                "precedent_explanations": [],
+                
                 # Retrieval and generation
                 "retrieved_chunks": [],
-                "response": "",
                 "sources": [],
                 "message_type": None
             }
@@ -280,6 +288,8 @@ async def chat_stream(request: Request, query_request: QueryRequest):
             accumulated_response = ""
             sources = []
             message_type = None
+            reasoning_steps = []
+            precedent_explanations = []
             final_state = {}
             
             # Stream events from graph
@@ -334,6 +344,18 @@ async def chat_stream(request: Request, query_request: QueryRequest):
                 if kind == "on_chain_end" and event.get("name") == "LangGraph":
                     output = event.get("data", {}).get("output", {})
                     final_state = output
+                    
+                    # Extract reasoning and explanations
+                    reasoning_steps = output.get("reasoning_steps", [])
+                    precedent_explanations = output.get("precedent_explanations", [])
+                    
+                    if reasoning_steps:
+                        logger.info(f"→ Generated {len(reasoning_steps)} reasoning steps")
+                        yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
+                    
+                    if precedent_explanations:
+                        logger.info(f"→ Generated {len(precedent_explanations)} precedent explanations")
+                        yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
             
             # CRITICAL: Save AI message to history
             if accumulated_response:
@@ -354,6 +376,12 @@ async def chat_stream(request: Request, query_request: QueryRequest):
             if message_type == "information_gathering":
                 completion_data['info_collected'] = final_state.get("info_collected", {})
                 completion_data['info_needed'] = final_state.get("info_needed_list", [])
+            
+            if reasoning_steps:
+                completion_data['reasoning_steps'] = reasoning_steps
+            
+            if precedent_explanations:
+                completion_data['precedent_explanations'] = precedent_explanations
             
             yield f"data: {json.dumps(completion_data)}\n\n"
             
@@ -464,7 +492,8 @@ async def list_conversations():
                             "last_modified": modified_time.isoformat(),
                             "message_count": message_count,
                             "status": status,
-                            "user_intent": state.get("user_intent", "Unknown")
+                            "user_intent": state.get("user_intent", "Unknown"),
+                            "has_reasoning": len(state.get("reasoning_steps", [])) > 0
                         })
                 except:
                     continue

@@ -10,7 +10,8 @@ Key fixes:
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict, List
 
-from numpy import info
+from numpy import add, info
+from sympy import root
 from state import FamilyLawState
 import os
 import json
@@ -24,10 +25,11 @@ class InformationGatherer:
     """
     Gathers information iteratively through targeted questions.
     """
-    
-    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian Law attorney conducting a client consultation.
+
+    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian FAMILY LAW attorney conducting a client consultation to collect information to answer the user's query.
 
 SITUATION:
+- User's Query: {root_query}
 - User Intent: {user_intent}
 - Information already collected: {info_collected}
 - Next information needed: {current_target}
@@ -40,22 +42,45 @@ GUIDELINES:
 1. Ask only about {current_target} - be specific
 2. Be empathetic and professional
 3. Use simple, clear language
-4. Reference previously collected information naturally if relevant
+4. Reference previously collected information and user's query naturally if relevant
 5. Make it easy for the user to answer
 
 YOUR QUESTION:"""
 
-    ANSWER_EXTRACTION_PROMPT = """Extract the answer from the user's response.
+#     ANSWER_EXTRACTION_PROMPT = """Extract the answer from the User's Response based on the Question asked.
+# CONTEXT:{root_query}
+# QUESTION ASKED: {last_question}.
+# USER'S RESPONSE: {user_response}
 
-QUESTION ASKED: We need information about "{info_target}"
+# Generate ONLY the relevant information that answers what we asked about.
+# Be concise but capture all relevant details.
+
+
+# RESPONSE FORMAT (Strictly JSON only, no other text):
+# {{
+#     "extracted_answer": "generated answer that supports the question or NOT_PROVIDED",
+#     "additional_context": "any other relevant details from the response else \"\""
+# }}
+# ANALYSIS (JSON only):"""
+    ANSWER_EXTRACTION_PROMPT = """Extract the answer from the User's Response based strictly on the Question asked.
+
+IMPORTANT RULES:
+- If the user's response directly answers the question, you MUST place it in "extracted_answer".
+- DO NOT put the direct answer in "additional_context".
+- Use "NOT_PROVIDED" ONLY if the user does not answer the question at all.
+
+CONTEXT: {root_query}
+QUESTION ASKED: {last_question}
 USER'S RESPONSE: {user_response}
 
-Extract ONLY the relevant information that answers what we asked about.
-Be concise but capture all relevant details.
+Generate ONLY the relevant information that answers the question.
 
-If the user didn't provide the information, respond with "NOT_PROVIDED"
-
-EXTRACTED ANSWER:"""
+RESPONSE FORMAT (Strictly JSON only, no other text):
+{{
+    "extracted_answer": "direct answer OR NOT_PROVIDED",
+    "additional_context": "supporting or secondary details only, else \"\""
+}}
+ANALYSIS (JSON only):"""
     
     def __init__(self, huggingface_api_key: str = None):
         """Initialize the InformationGatherer with LLM."""
@@ -63,7 +88,15 @@ EXTRACTED ANSWER:"""
         
         self.llm = ChatHuggingFace(
             llm=HuggingFaceEndpoint(
-                repo_id="meta-llama/Llama-3.1-8B-Instruct",
+                repo_id=os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
+                huggingfacehub_api_token=api_key,
+                task="text-generation",
+                max_new_tokens=512,
+            )
+        )
+        self.llm2 = ChatHuggingFace(
+            llm=HuggingFaceEndpoint(
+                repo_id="mistralai/Ministral-3-8B-Instruct-2512-BF16",
                 huggingfacehub_api_token=api_key,
                 task="text-generation",
                 max_new_tokens=512,
@@ -81,6 +114,7 @@ EXTRACTED ANSWER:"""
         4. If no more info needed: Mark as complete
         """
         query = state["query"]
+        root_query = state.get("root_query", query)
         messages = state.get("messages", [])
         info_collected = dict(state.get("info_collected", {}))
         info_needed_list = list(state.get("info_needed_list", []))
@@ -107,12 +141,26 @@ EXTRACTED ANSWER:"""
             if last_user_msg:
                 logger.info(f"Extracting answer for: {current_target}")
                 logger.info(f"From response: {last_user_msg.content[:100]}...")
-                
+                last_question = state.get("follow_up_question", "N/A")
                 # Extract the information
-                extracted = self._extract_information(
+                print(f"Question: {last_question}\nResponse: {last_user_msg.content}\nTarget: {current_target}\n")
+                response = self._extract_information(
+                    root_query,
+                    last_question,
                     last_user_msg.content,
                     current_target
                 )
+
+                # Parse the JSON response
+                try:
+                    extraction_json = json.loads(response)
+                    extracted = extraction_json.get("extracted_answer", "NOT_PROVIDED")
+                    additional_context = extraction_json.get("additional_context", "")
+                    if additional_context:
+                        info_collected["additional_info"] = additional_context + "\n" + info_collected.get("additional_info", "")
+                except Exception as e:
+                    logger.error(f"Error parsing extraction JSON: {str(e)}")
+                    extracted = response  # Fallback to raw response
                 
                 logger.info(f"Extracted value: {extracted[:100]}...")
                 
@@ -126,7 +174,7 @@ EXTRACTED ANSWER:"""
                     logger.info(f"✓ Stored answer for: {current_target}")
                     logger.info(f"Updated needed list: {info_needed_list}")
                 else:
-                    info_collected["additional_info"] = last_user_msg.content.strip() + info_collected.get("additional_info", "") 
+                    info_collected["additional_info"] = last_user_msg.content.strip() + "\n"+info_collected.get("additional_info", "") 
                     logger.warning(f"User didn't provide {current_target}, keeping in list")
         
         # STEP 2: Check if we're done
@@ -145,6 +193,7 @@ EXTRACTED ANSWER:"""
         logger.info(f"Generating question for: {next_target}")
         
         next_question = self._generate_question(
+            root_query,
             user_intent,
             info_collected,
             next_target,
@@ -164,6 +213,7 @@ EXTRACTED ANSWER:"""
     
     def _generate_question(
         self,
+        root_query: str,
         user_intent: str,
         info_collected: Dict,
         current_target: str,
@@ -175,6 +225,7 @@ EXTRACTED ANSWER:"""
         
         # Prepare prompt
         prompt = self.QUESTION_GENERATION_PROMPT.format(
+            root_query=root_query,
             user_intent=user_intent.replace("_", " ").title(),
             info_collected=collected_str or "None yet",
             current_target=current_target.replace("_", " ").title(),
@@ -206,11 +257,13 @@ EXTRACTED ANSWER:"""
             # Fallback
             return f"Could you please provide information about: {current_target.replace('_', ' ')}?"
     
-    def _extract_information(self, user_response: str, info_target: str) -> str:
+    def _extract_information(self, last_question: str, user_response: str, info_target: str, root_query: str) -> str:
         """Extract specific information from user's response."""
         
         prompt = self.ANSWER_EXTRACTION_PROMPT.format(
-            info_target=info_target.replace("_", " ").title(),
+            root_query=root_query,
+            last_question=last_question,
+            # info_target=info_target.replace("_", " ").title(),
             user_response=user_response
         )
         

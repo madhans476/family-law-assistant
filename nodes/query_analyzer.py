@@ -24,25 +24,26 @@ class QueryAnalyzer:
     Analyzes user queries to understand intent, case type, and information needs.
     """
     
-    QUERY_ANALYSIS_PROMPT = """You are an expert Indian LAW analyst. Analyze the user's query to understand their legal situation.
+    QUERY_ANALYSIS_PROMPT = """You are an expert Indian FAMILY LAW analyst. Analyze the user's query to understand their legal situation.
 
 Your task is to:
 1. Identify the PRIMARY legal intent (what they want help with)
 2. Assess confidence in understanding their intent (high/medium/low)
-3. Extract what information the user HAS PROVIDED
-4. Identify what CRITICAL information is STILL NEEDED to answer their query without making assumptions
+3. Extract what information the user HAS PROVIDED(like user's gender, dates, relationships, incidents, etc.)
+4. Identify what the most CRITICAL information is STILL NEEDED (like specific dates, victim's gender, relationships, incidents) to answer their query without making assumptions
+5. It is compulsory that you need the geneder of the messaging person to give accurate legal advice.
 
 RESPONSE FORMAT (Strictly JSON only, no other text):
 {{
   "user_intent": "brief description of what user wants to achieve",
   "intent_confidence": "high|medium|low",
   "info_provided": {{
-    "key1": "value1",
-    "key2": "value2"
+    "detailed_key1": "value1",
+    "detailed_key2": "value2"
   }},
   "info_needed": [
-    "specific_info_1",
-    "specific_info_2"
+    "detailed_info_1",
+    "detailed_info_2"
   ]
 }}
 
@@ -69,7 +70,7 @@ ANALYSIS (JSON only):"""
         
         self.llm = ChatHuggingFace(
             llm=HuggingFaceEndpoint(
-                repo_id="meta-llama/Llama-3.1-8B-Instruct",
+                repo_id = os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
                 huggingfacehub_api_token=api_key,
                 task="text-generation",
                 max_new_tokens=1024,
@@ -112,6 +113,7 @@ ANALYSIS (JSON only):"""
             analysis = json.loads(response_text)
             
             # Validate and set defaults
+
             user_intent = analysis.get("user_intent", "")
             intent_confidence = analysis.get("intent_confidence", "medium")
             info_provided = analysis.get("info_provided", {})

@@ -1,10 +1,7 @@
 """
-Fixed Generator Node - Generates complete legal advice without truncation.
+Enhanced Generator Node with Explainable AI
 
-Key fixes:
-1. Increased max_new_tokens to allow longer responses
-2. Better context formatting to reduce input token usage
-3. Streamlined prompt to focus on essential information
+Generates legal advice with transparent reasoning chains and precedent explanations.
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,18 +10,23 @@ from state import FamilyLawState
 import os
 import logging
 from nodes.case_outcome_predictor import CaseOutcomePredictor
+from nodes.reasoning_explainer import (
+    ReasoningExplainer, 
+    create_case_summary
+)
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize LLM with higher token limit
+# Initialize LLM
 llm = ChatHuggingFace(
     llm=HuggingFaceEndpoint(
-        repo_id="meta-llama/Llama-3.1-8B-Instruct",
+        # repo_id="meta-llama/Llama-3.1-8B-Instruct",
+        repo_id = os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
         huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_KEY"),
         task="conversational",
-        max_new_tokens=2048,  # INCREASED from default (~512) to 2048
+        max_new_tokens=2048,
         temperature=0.7,
     )
 )
@@ -34,9 +36,9 @@ example_query = ("I got engaged in June 2018 and married in February 2019. Soon 
 "Instead, he beat me and stopped me from leaving. I escaped this morning. I want a divorce as soon as possible.")
 
 example_responses = [
-"First, lodge an FIR under Section 498A for cruelty. Then consult a lawyer to file two cases: one under the Domestic Violence Act, and another for Judicial Separation under Section 10 of the Hindu Marriage Act, since you can’t seek divorce before one year of marriage.",
+"First, lodge an FIR under Section 498A for cruelty. Then consult a lawyer to file two cases: one under the Domestic Violence Act, and another for Judicial Separation under Section 10 of the Hindu Marriage Act, since you can't seek divorce before one year of marriage.",
 "You can file for divorce in family court under the Hindu Marriage Act on grounds of mental and physical cruelty. Also, register an FIR under Sections 498A and 323 IPC.",
-"Since you married in February 2019, you must wait one year before filing for divorce. Meanwhile, file a police complaint for assault — it will support your case for cruelty. You can also claim maintenance under Section 125 CrPC if he isn’t supporting you."
+"Since you married in February 2019, you must wait one year before filing for divorce. Meanwhile, file a police complaint for assault — it will support your case for cruelty. You can also claim maintenance under Section 125 CrPC if he isn't supporting you."
 ]
 
 SYSTEM_PROMPT = (
@@ -56,41 +58,19 @@ f"Query:\n{example_query}\n\n"
 f"1. {example_responses[0]}\n"
 f"2. {example_responses[1]}\n"
 f"3. {example_responses[2]}\n"
-
 )
 
-
-# SYSTEM_PROMPT = """You are a senior Indian family law attorney with 20+ years of experience. 
-# Provide clear, actionable legal advice based on case information and relevant legal precedents.
-
-# GUIDELINES:
-# 1. Provide practical, step-by-step advice
-# 2. Reference relevant Indian laws, sections, and precedents
-# 3. Explain legal terms simply (Flesch Reading Ease ≥ 55)
-# 4. Be empathetic and professional
-# 5. Prioritize safety in domestic violence cases
-# 6. Structure response with clear sections:
-#    - Immediate Actions
-#    - Legal Options Available
-#    - Relevant Laws & Precedents
-#    - Next Steps
-# 7. Only use provided context - never make up information
-
-# IMPORTANT: Keep your response complete and comprehensive. Do not truncate."""
-
 def format_context(retrieved_chunks: list) -> str:
-    """Format retrieved chunks efficiently to save tokens."""
+    """Format retrieved chunks efficiently."""
     if not retrieved_chunks:
         return "No relevant precedents found."
     
     context_parts = ["RELEVANT LEGAL PRECEDENTS:\n"]
 
-    # Limit to top 5 most relevant to save tokens
     for i, chunk in enumerate(retrieved_chunks[:5], 1):
         context_parts.append(f"\n[Precedent {i}] ({chunk['score']:.0%} relevance)")
         context_parts.append(f"Title: {chunk['metadata']['title']}")
         context_parts.append(f"Category: {chunk['metadata']['category']}")
-        # Use first 500 chars instead of 400 to save tokens
         content = chunk['content']
         context_parts.append(f"Content: {content}")
         context_parts.append("")
@@ -98,7 +78,7 @@ def format_context(retrieved_chunks: list) -> str:
     return "\n".join(context_parts)
 
 def format_case_info(info_collected: Dict, user_intent: str) -> str:
-    """Format collected case information concisely."""
+    """Format collected case information."""
     if not info_collected:
         return "Limited case information available."
     
@@ -112,7 +92,7 @@ def format_case_info(info_collected: Dict, user_intent: str) -> str:
 
 def generate_response(state: FamilyLawState) -> Dict:
     """
-    Generate comprehensive legal advice.
+    Generate comprehensive legal advice with transparent reasoning.
     """
     query = state["query"]
     retrieved_chunks = state.get("retrieved_chunks", [])
@@ -120,26 +100,29 @@ def generate_response(state: FamilyLawState) -> Dict:
     info_collected = state.get("info_collected", {})
     user_intent = state.get("user_intent", "legal advice")
     include_prediction = state.get("include_prediction", True)
+    include_reasoning = state.get("include_reasoning", True)
     
     # Validate we have information
     if not retrieved_chunks:
         logger.warning("No retrieved chunks available for generation")
         return {
             "response": "I apologize, but I couldn't find sufficient relevant information in the legal database to provide comprehensive advice for your specific situation. Please consider consulting with a family law attorney directly for personalized guidance.",
-            "messages": messages
+            "messages": messages,
+            "reasoning_steps": [],
+            "precedent_explanations": []
         }
     
     # Format context and case information
     legal_context = format_context(retrieved_chunks)
     case_information = format_case_info(info_collected, user_intent)
     
-    # Build conversation - only include recent history to save tokens
+    # Build conversation
     conversation = [SystemMessage(content=SYSTEM_PROMPT)]
     
     if messages:
         conversation.extend(messages[-4:])
     
-    # Construct focused prompt
+    # Construct prompt
     prompt = f"""Provide complete legal advice (experienced lawyer) based on the case information and precedents below.
 
 {case_information}
@@ -163,9 +146,9 @@ YOUR COMPLETE RESPONSE:"""
     conversation.append(HumanMessage(content=prompt))
     
     try:
-        logger.info("Generating response with max_tokens=2048")
+        logger.info("Generating response with explainable AI")
         
-        # Generate response
+        # Generate main response
         response = llm.invoke(conversation)
         response_content = response.content
         
@@ -173,24 +156,64 @@ YOUR COMPLETE RESPONSE:"""
         if len(response_content) < 500:
             logger.warning(f"Response seems short: {len(response_content)} chars")
         
-        # Add disclaimer if not present
-        if "not a substitute for legal advice" not in response_content.lower():
-            response_content += "\n\n---\n**Disclaimer**: This information is for educational purposes only and does not constitute legal advice. Please consult with a qualified family law attorney for personalized legal guidance."
+        # Initialize explainer
+        reasoning_steps = []
+        precedent_explanations = []
         
-        if include_prediction and info_collected and len(info_collected) >= 3:
+        if include_reasoning:
+            try:
+                logger.info("🧠 Generating reasoning chain...")
+                explainer = ReasoningExplainer()
+                
+                # Generate reasoning chain
+                reasoning_steps = explainer.generate_reasoning_chain(
+                    user_intent=user_intent,
+                    info_collected=info_collected,
+                    response=response_content,
+                    retrieved_chunks=retrieved_chunks
+                )
+                
+                # Generate precedent explanations
+                case_summary = create_case_summary(info_collected, user_intent)
+                precedent_explanations = explainer.generate_all_precedent_explanations(
+                    case_summary=case_summary,
+                    retrieved_chunks=retrieved_chunks
+                )
+                
+                # Append reasoning to response
+                # reasoning_text = explainer.format_reasoning_for_response(reasoning_steps)
+                # response_content += "\n\n" + reasoning_text
+                
+                # # Append precedent explanations
+                # if precedent_explanations:
+                #     response_content += "\n\n" + "="*60
+                #     response_content += "\n📚 WHY THESE PRECEDENTS MATTER"
+                #     response_content += "\n" + "="*60
+                    
+                #     for i, explanation in enumerate(precedent_explanations, 1):
+                #         response_content += f"\n\n**Precedent {i}:**"
+                #         response_content += explainer.format_precedent_explanation(explanation)
+                
+                logger.info(f"   ✓ Added {len(reasoning_steps)} reasoning steps")
+                logger.info(f"   ✓ Added {len(precedent_explanations)} precedent explanations")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate reasoning: {e}", exc_info=True)
+                # Continue without reasoning rather than failing
+        
+        # Add outcome prediction if requested
+        if include_prediction and info_collected and len(info_collected) >= 30:
             try:
                 predictor = CaseOutcomePredictor()
                 prediction = predictor.predict_outcome(
-                    user_intent=state.get("user_intent", ""),
+                    user_intent=user_intent,
                     info_collected=info_collected,
                     retrieved_precedents=retrieved_chunks
                 )
                 
-                # Format and append
-                prediction_text = predictor.format_prediction_for_display(prediction)
-                response_content += "\n\n" + prediction_text
+                # prediction_text = predictor.format_prediction_for_display(prediction)
+                # response_content += "\n\n" + prediction_text
                 
-                # Store in state for frontend
                 state["prediction"] = {
                     "probability_range": prediction.win_probability_range,
                     "case_strength": prediction.case_strength.value,
@@ -198,17 +221,51 @@ YOUR COMPLETE RESPONSE:"""
                 }
             except Exception as e:
                 logger.error(f"Prediction failed: {e}")
-
+        
+        # Add disclaimer
+        if "not a substitute for legal advice" not in response_content.lower():
+            response_content += "\n\n---\n**Disclaimer**: This information is for educational purposes only and does not constitute legal advice. Please consult with a qualified family law attorney for personalized legal guidance."
+        
         logger.info(f"Generated response: {len(response_content)} characters")
+        
+        # Convert reasoning steps to serializable format
+        reasoning_steps_dict = []
+        for step in reasoning_steps:
+            reasoning_steps_dict.append({
+                "step_number": step.step_number,
+                "step_type": step.step_type,
+                "title": step.title,
+                "explanation": step.explanation,
+                "confidence": step.confidence,
+                "supporting_sources": step.supporting_sources,
+                "legal_provisions": step.legal_provisions
+            })
+        
+        # Convert precedent explanations to serializable format
+        precedent_explanations_dict = []
+        for explanation in precedent_explanations:
+            precedent_explanations_dict.append({
+                "precedent_title": explanation.precedent_title,
+                "similarity_score": explanation.similarity_score,
+                "matching_factors": explanation.matching_factors,
+                "different_factors": explanation.different_factors,
+                "key_excerpt": explanation.key_excerpt,
+                "relevance_explanation": explanation.relevance_explanation,
+                "citation": explanation.citation
+            })
         
         return {
             "response": response_content,
-            "messages": conversation + [response]
+            "messages": conversation + [response],
+            "reasoning_steps": reasoning_steps_dict,
+            "precedent_explanations": precedent_explanations_dict
         }
     
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
         return {
             "response": f"I apologize, but I encountered an error while generating advice. Please try rephrasing your question or contact support. Error: {str(e)}",
-            "messages": messages
+            "messages": messages,
+            "reasoning_steps": [],
+            "precedent_explanations": []
         }

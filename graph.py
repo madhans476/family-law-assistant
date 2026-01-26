@@ -55,6 +55,7 @@ def analyze_query_node(state: FamilyLawState) -> FamilyLawState:
         response = agent.analyze_query(state)
         
         # Update state
+        
         state["user_intent"] = response.get("user_intent")
         state["info_needed_list"] = response.get("info_needed_list", [])
         state["has_sufficient_info"] = response.get("has_sufficient_info", False)
@@ -175,7 +176,7 @@ def revalidate_information_node(state: FamilyLawState) -> FamilyLawState:
             for key, value in info_collected.items()
         ])
         
-        synthetic_query = f"{original_query}\n\nCollected Information:\n{info_context}"
+        synthetic_query = f"{original_query}\n\nMy Information:\n{info_context}"
         
         # Create temporary state for re-validation
         temp_state = dict(state)
@@ -332,13 +333,14 @@ def create_graph():
     workflow.add_node("gather_info", gather_information_node)
     workflow.add_node("ask_question", format_follow_up_response)
     workflow.add_node("revalidate", revalidate_information_node)
-    workflow.add_node("preprocess", preprocess_user_message)
+    # workflow.add_node("preprocess", preprocess_user_message)
     workflow.add_node("retrieve", retrieve_documents_node)
     workflow.add_node("generate", generate_response_node)
     
     # Edges
-    workflow.add_edge(START, "preprocess")
-    workflow.add_edge("preprocess", "analyze_query")
+    # workflow.add_edge(START, "preprocess")
+    # workflow.add_edge("preprocess", "analyze_query")
+    workflow.add_edge(START, "analyze_query")
     
     workflow.add_conditional_edges(
         "analyze_query",

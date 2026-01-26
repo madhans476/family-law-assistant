@@ -68,7 +68,7 @@ YOUR CLASSIFICATION:"""
         
         self.llm = ChatHuggingFace(
             llm=HuggingFaceEndpoint(
-                repo_id="meta-llama/Llama-3.1-8B-Instruct",
+                repo_id = os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
                 huggingfacehub_api_token=api_key,
                 task="text-generation",
                 max_new_tokens=512,
@@ -158,6 +158,8 @@ YOUR CLASSIFICATION:"""
             # First interaction, proceed normally
             logger.info("First interaction - no update handling needed")
             return state
+        
+        
         
         # Classify the intent
         classification = self.classify_followup_intent(
