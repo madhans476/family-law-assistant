@@ -1,20 +1,8 @@
 'use client';
-
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Trash2, Plus, Scale, BookOpen, Loader2, MessageSquare, ExternalLink, FileText, AlertCircle, CheckCircle, Clock, Info, Brain, Lightbulb, ChevronDown, ChevronUp, Edit2, Check, X } from 'lucide-react';
 
 // Types
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp?: Date;
-  messageType?: 'clarification' | 'information_gathering' | 'final_response';
-  infoCollected?: Record<string, string>;
-  infoNeeded?: string[];
-  reasoningSteps?: ReasoningStep[];
-  precedentExplanations?: PrecedentExplanation[];
-}
-
 interface ReasoningStep {
   step_number: number;
   step_type: string;
@@ -35,10 +23,15 @@ interface PrecedentExplanation {
   citation: string;
 }
 
-interface Source {
-  title: string;
-  url?: string;
-  category?: string;
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: Date;
+  messageType?: 'clarification' | 'information_gathering' | 'final_response';
+  infoCollected?: Record<string, string>;
+  infoNeeded?: string[];
+  reasoningSteps?: ReasoningStep[];
+  precedentExplanations?: PrecedentExplanation[];
 }
 
 interface Conversation {
@@ -56,7 +49,7 @@ const LegalAssistChat: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [sources, setSources] = useState<Source[]>([]);
+  const [sources, setSources] = useState<any[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [conversationStatus, setConversationStatus] = useState<string>('ready');
@@ -122,24 +115,69 @@ const LegalAssistChat: React.FC = () => {
       const data = await res.json();
       setCurrentThreadId(threadId);
       
-      const formattedMessages: Message[] = data.messages.map((msg: any) => ({
-        role: msg.role === 'HumanMessage' ? 'user' : 'assistant',
-        content: msg.content,
-        timestamp: new Date()
-      }));
+      // *** CRITICAL FIX: Map messages with their reasoning/precedents ***
+      const savedMessages = data.messages || [];
+      const savedState = data.state || {};
+      
+      // Get saved reasoning and precedent explanations FROM STATE
+      const savedReasoning = savedState.reasoning_steps || [];
+      const savedPrecedents = savedState.precedent_explanations || [];
+      const savedInfoCollected = savedState.info_collected || {};
+      
+      console.log('📊 Loading conversation:', {
+        messageCount: savedMessages.length,
+        reasoningSteps: savedReasoning.length,
+        precedents: savedPrecedents.length,
+        infoCollected: Object.keys(savedInfoCollected).length
+      });
+      
+      const formattedMessages: Message[] = savedMessages.map((msg: any, idx: number) => {
+        // Find the LAST assistant message (final response)
+        const isLastAssistantMsg = msg.role === 'AIMessage' && 
+                                    idx === savedMessages.length - 1;
+        
+        const message: Message = {
+          role: msg.role === 'HumanMessage' ? 'user' : 'assistant',
+          content: msg.content,
+          timestamp: new Date(),
+        };
+        
+        // *** Attach reasoning to LAST assistant message only ***
+        if (isLastAssistantMsg && savedReasoning.length > 0) {
+          message.reasoningSteps = savedReasoning;
+          message.precedentExplanations = savedPrecedents;
+          message.messageType = 'final_response';
+          console.log('✅ Attached reasoning to message', idx, {
+            reasoning: savedReasoning.length,
+            precedents: savedPrecedents.length
+          });
+        } else if (msg.role === 'AIMessage') {
+          // Check if this is a gathering message
+          const isGatheringMsg = savedState.in_gathering_phase || 
+                                Object.keys(savedInfoCollected).length > 0;
+          if (isGatheringMsg && idx < savedMessages.length - 1) {
+            message.messageType = 'information_gathering';
+            message.infoCollected = savedInfoCollected;
+          }
+        }
+        
+        return message;
+      });
+      
       setMessages(formattedMessages);
       setSources([]);
-      setInfoCollected(data.state?.info_collected || {});
-      setInfoNeeded(data.state?.info_needed || []);
+      setInfoCollected(savedInfoCollected);
+      setInfoNeeded(savedState.info_needed || []);
       
-      const state = data.state || {};
-      if (state.has_sufficient_info) {
+      if (savedState.has_sufficient_info) {
         setConversationStatus('completed');
-      } else if (state.in_gathering_phase) {
+      } else if (savedState.in_gathering_phase) {
         setConversationStatus('gathering_info');
       } else {
         setConversationStatus('analyzing');
       }
+      
+      console.log(`✓ Loaded with ${savedReasoning.length} reasoning steps, ${savedPrecedents.length} precedents`);
     } catch (err) {
       console.error('Failed to load thread:', err);
       setError('Unable to load this conversation');
@@ -174,7 +212,6 @@ const LegalAssistChat: React.FC = () => {
     setInfoCollected(updatedInfo);
     setEditingInfo(null);
     
-    // Send correction to backend
     const correctionMessage = `I need to correct the ${key.replace('_', ' ')}: it should be "${newValue}"`;
     sendMessage(correctionMessage);
   };
@@ -211,9 +248,7 @@ const LegalAssistChat: React.FC = () => {
         })
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No response body');
@@ -504,117 +539,40 @@ const LegalAssistChat: React.FC = () => {
     );
   };
 
-  const InfoCollectedPanel: React.FC = () => {
-    if (Object.keys(infoCollected).length === 0) return null;
+  // *** Component that shows collected info - receives props to control display ***
+  const InfoCollectedSummary: React.FC<{ collectedInfo: Record<string, string> }> = ({ collectedInfo }) => {
+    if (!collectedInfo || Object.keys(collectedInfo).length === 0) return null;
     
-    const collected = Object.keys(infoCollected).length;
-    const needed = infoNeeded.length;
-    const total = collected + needed;
+    const collected = Object.keys(collectedInfo).length;
     
     return (
       <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 border border-blue-500/30 rounded-xl p-5 mb-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Info className="w-5 h-5 text-blue-400" />
-            <h3 className="text-white font-semibold">Information I've Collected</h3>
-            <span className="text-xs text-gray-400">Click to edit if incorrect</span>
+            <h3 className="text-white font-semibold">Information Collected</h3>
           </div>
           
-          {total > 0 && (
-            <div className={`px-3 py-1 rounded-lg border ${getStatusColor(conversationStatus)}`}>
-              <div className="flex items-center gap-2">
-                {getStatusIcon(conversationStatus)}
-                <span className="text-xs font-medium">{collected}/{total} Complete</span>
-              </div>
-            </div>
-          )}
-        </div>
-        
-        {/* Progress Bar */}
-        {total > 0 && (
-          <div className="mb-4">
-            <div className="flex justify-between text-xs text-gray-400 mb-2">
-              <span>Collected: {collected}</span>
-              <span>Remaining: {needed}</span>
-            </div>
-            <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
-              <div 
-                className="bg-gradient-to-r from-blue-500 to-blue-400 h-3 rounded-full transition-all duration-500 ease-out relative"
-                style={{ width: `${(collected / total) * 100}%` }}
-              >
-                <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
-              </div>
+          <div className="px-3 py-1 rounded-lg border border-green-500/30 bg-green-500/20">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="w-4 h-4 text-green-400" />
+              <span className="text-xs font-medium text-green-300">{collected} items collected</span>
             </div>
           </div>
-        )}
+        </div>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {Object.entries(infoCollected).map(([key, value]) => (
-            <div key={key} className="bg-slate-800/30 rounded-lg p-3 group">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-blue-300 mb-1">
-                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                  </div>
-                  {editingInfo === key ? (
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={editValue}
-                        onChange={(e) => setEditValue(e.target.value)}
-                        className="flex-1 px-2 py-1 bg-slate-700 text-white rounded text-sm"
-                        autoFocus
-                      />
-                      <button
-                        onClick={() => updateCollectedInfo(key, editValue)}
-                        className="p-1 bg-green-500 hover:bg-green-600 rounded"
-                      >
-                        <Check className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => setEditingInfo(null)}
-                        className="p-1 bg-red-500 hover:bg-red-600 rounded"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="text-white text-sm truncate">{value}</div>
-                  )}
+          {Object.entries(collectedInfo)
+            .filter(([key]) => key !== 'additional_info') // Skip additional_info
+            .map(([key, value]) => (
+              <div key={key} className="bg-slate-800/30 rounded-lg p-3">
+                <div className="text-sm text-blue-300 mb-1">
+                  {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                 </div>
-                {editingInfo !== key && (
-                  <button
-                    onClick={() => {
-                      setEditingInfo(key);
-                      setEditValue(value);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-slate-700 rounded"
-                  >
-                    <Edit2 className="w-4 h-4 text-gray-400" />
-                  </button>
-                )}
+                <div className="text-white text-sm">{value}</div>
               </div>
-            </div>
-          ))}
+            ))}
         </div>
-        
-        {/* Info Needed Section */}
-        {infoNeeded.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-blue-500/20">
-            <h4 className="text-sm font-semibold text-yellow-300 mb-2 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              Still Need to Know:
-            </h4>
-            <ul className="space-y-1">
-              {infoNeeded.map((item, idx) => (
-                <li key={idx} className="text-sm text-gray-300 flex items-start gap-2">
-                  <span className="text-yellow-400">•</span>
-                  <span>{item.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
     );
   };
@@ -760,8 +718,6 @@ const LegalAssistChat: React.FC = () => {
             </div>
           )}
 
-          <InfoCollectedPanel />
-
           {messages.length === 0 && !streamingMessage && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-2xl px-6">
@@ -776,77 +732,97 @@ const LegalAssistChat: React.FC = () => {
             </div>
           )}
 
-          {messages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
-            >
-              <div className="max-w-4xl w-full">
-                <div
-                  className={`${
-                    msg.role === 'user'
-                      ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white ml-auto max-w-3xl'
-                      : msg.messageType === 'clarification'
-                      ? 'bg-yellow-500/10 border-2 border-yellow-500/30 text-gray-100'
-                      : msg.messageType === 'information_gathering'
-                      ? 'bg-blue-500/10 border-2 border-blue-500/30 text-gray-100'
-                      : 'bg-slate-800/50 backdrop-blur-sm text-gray-100 border border-blue-500/10'
-                  } rounded-2xl shadow-lg overflow-hidden`}
-                >
-                  <div className="px-6 py-4">
-                    {msg.messageType === 'clarification' && (
-                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-yellow-500/20">
-                        <AlertCircle className="w-4 h-4 text-yellow-400" />
-                        <span className="text-xs font-semibold text-yellow-300 uppercase">Need Clarification</span>
-                      </div>
-                    )}
-                    {msg.messageType === 'information_gathering' && (
-                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-blue-500/20">
-                        <Info className="w-4 h-4 text-blue-400" />
-                        <span className="text-xs font-semibold text-blue-300 uppercase">Gathering Information</span>
-                      </div>
-                    )}
+          {messages.map((msg, idx) => {
+            // *** FIND WHERE TO INSERT INFO SUMMARY ***
+            // Look for: last gathering message followed by final response
+            const isGatheringMessage = msg.messageType === 'information_gathering';
+            const nextMessage = idx < messages.length - 1 ? messages[idx + 1] : null;
+            const nextIsFinalResponse = nextMessage?.messageType === 'final_response';
+            
+            // Show info summary AFTER last gathering message, BEFORE final response
+            const showInfoSummaryAfterThis = isGatheringMessage && nextIsFinalResponse;
+            
+            // Get info to display (from message or from state)
+            const infoToDisplay = msg.infoCollected || (showInfoSummaryAfterThis ? infoCollected : null);
+            
+            return (
+              <React.Fragment key={idx}>
+                <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}>
+                  <div className="max-w-4xl w-full">
                     <div
-                      dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
-                      className="prose prose-invert max-w-none"
-                    />
-                    {renderInfoProgress(msg)}
-                  </div>
-                  {msg.timestamp && (
-                    <div className="px-6 py-2 border-t border-white/10 bg-black/10">
-                      <p className="text-xs opacity-75">{formatTime(msg.timestamp)}</p>
+                      className={`${
+                        msg.role === 'user'
+                          ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white ml-auto max-w-3xl'
+                          : msg.messageType === 'clarification'
+                          ? 'bg-yellow-500/10 border-2 border-yellow-500/30 text-gray-100'
+                          : msg.messageType === 'information_gathering'
+                          ? 'bg-blue-500/10 border-2 border-blue-500/30 text-gray-100'
+                          : 'bg-slate-800/50 backdrop-blur-sm text-gray-100 border border-blue-500/10'
+                      } rounded-2xl shadow-lg overflow-hidden`}
+                    >
+                      <div className="px-6 py-4">
+                        {msg.messageType === 'clarification' && (
+                          <div className="flex items-center gap-2 mb-2 pb-2 border-b border-yellow-500/20">
+                            <AlertCircle className="w-4 h-4 text-yellow-400" />
+                            <span className="text-xs font-semibold text-yellow-300 uppercase">Need Clarification</span>
+                          </div>
+                        )}
+                        {msg.messageType === 'information_gathering' && (
+                          <div className="flex items-center gap-2 mb-2 pb-2 border-b border-blue-500/20">
+                            <Info className="w-4 h-4 text-blue-400" />
+                            <span className="text-xs font-semibold text-blue-300 uppercase">Gathering Information</span>
+                          </div>
+                        )}
+                        <div
+                          dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
+                          className="prose prose-invert max-w-none"
+                        />
+                        {renderInfoProgress(msg)}
+                      </div>
+                      {msg.timestamp && (
+                        <div className="px-6 py-2 border-t border-white/10 bg-black/10">
+                          <p className="text-xs opacity-75">{formatTime(msg.timestamp)}</p>
+                        </div>
+                      )}
                     </div>
-                  )}
+
+                    {/* Reasoning Steps - ONLY for final response */}
+                    {msg.messageType === 'final_response' && msg.reasoningSteps && msg.reasoningSteps.length > 0 && (
+                      <div className="mt-4 space-y-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Brain className="w-5 h-5 text-blue-400" />
+                          <h3 className="text-white font-semibold">How I Reached This Conclusion</h3>
+                        </div>
+                        {msg.reasoningSteps.map((step, stepIdx) => (
+                          <ReasoningStepCard key={stepIdx} step={step} index={stepIdx} />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Precedent Explanations - ONLY for final response */}
+                    {msg.messageType === 'final_response' && msg.precedentExplanations && msg.precedentExplanations.length > 0 && (
+                      <div className="mt-4 space-y-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Lightbulb className="w-5 h-5 text-purple-400" />
+                          <h3 className="text-white font-semibold">Why These Precedents Matter</h3>
+                        </div>
+                        {msg.precedentExplanations.map((precedent, precIdx) => (
+                          <PrecedentCard key={precIdx} precedent={precedent} index={precIdx} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-
-                {/* Reasoning Steps */}
-                {msg.reasoningSteps && msg.reasoningSteps.length > 0 && (
-                  <div className="mt-4 space-y-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Brain className="w-5 h-5 text-blue-400" />
-                      <h3 className="text-white font-semibold">How I Reached This Conclusion</h3>
-                    </div>
-                    {msg.reasoningSteps.map((step, stepIdx) => (
-                      <ReasoningStepCard key={stepIdx} step={step} index={stepIdx} />
-                    ))}
+                
+                {/* *** Show Info Summary AFTER last gathering, BEFORE final response *** */}
+                {showInfoSummaryAfterThis && infoToDisplay && Object.keys(infoToDisplay).length > 0 && (
+                  <div className="animate-fade-in my-4">
+                    <InfoCollectedSummary collectedInfo={infoToDisplay} />
                   </div>
                 )}
-
-                {/* Precedent Explanations */}
-                {msg.precedentExplanations && msg.precedentExplanations.length > 0 && (
-                  <div className="mt-4 space-y-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Lightbulb className="w-5 h-5 text-purple-400" />
-                      <h3 className="text-white font-semibold">Why These Precedents Matter</h3>
-                    </div>
-                    {msg.precedentExplanations.map((precedent, precIdx) => (
-                      <PrecedentCard key={precIdx} precedent={precedent} index={precIdx} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
+              </React.Fragment>
+            );
+          })}
 
           {streamingMessage && (
             <div className="flex justify-start animate-fade-in">

@@ -29,8 +29,8 @@ class QueryAnalyzer:
 Your task is to:
 1. Identify the PRIMARY legal intent (what they want help with)
 2. Assess confidence in understanding their intent (high/medium/low)
-3. Extract what information the user HAS PROVIDED(like user's gender, dates, relationships, incidents, etc.)
-4. Identify what the most CRITICAL information is STILL NEEDED (like specific dates, victim's gender, relationships, incidents) to answer their query without making assumptions
+3. Extract what information the user HAS PROVIDED(like user's gender, dates, relationships, incidents, religion for matrimonial problems etc.)
+4. Identify what the most CRITICAL information is STILL NEEDED (like specific dates, victim's gender, religion for matrimonial problems, relationships, incidents) to answer their query without making assumptions
 5. It is compulsory that you need the geneder of the messaging person to give accurate legal advice.
 
 RESPONSE FORMAT (Strictly JSON only, no other text):

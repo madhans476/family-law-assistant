@@ -1,18 +1,14 @@
 """
-Fixed Information Gatherer Node - Properly updates state between iterations.
+Fixed Information Gatherer Node - Improved answer extraction and gender handling.
 
 Key fixes:
-1. Correctly identifies when processing user responses vs asking new questions
-2. Properly updates info_collected and removes from info_needed_list
-3. Better extraction logic
+1. Better answer extraction with multiple attempts
+2. Gender persistence across conversation
+3. Clearer extraction prompts
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict, List
-
-from numpy import add, info
-from sympy import root
-from state import FamilyLawState
 import os
 import json
 import logging
@@ -26,61 +22,54 @@ class InformationGatherer:
     Gathers information iteratively through targeted questions.
     """
 
-    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian FAMILY LAW attorney conducting a client consultation to collect information to answer the user's query.
+    QUESTION_GENERATION_PROMPT = """You are a compassionate Indian FAMILY LAW attorney conducting a client consultation.
 
 SITUATION:
 - User's Query: {root_query}
 - User Intent: {user_intent}
 - Information already collected: {info_collected}
 - Next information needed: {current_target}
-- All remaining needs: {all_remaining}
 
 YOUR TASK:
-Ask ONE clear, empathetic question to gather information about: {current_target}
+Ask ONE clear, empathetic question to gather: {current_target}
 
-GUIDELINES:
-1. Ask only about {current_target} - be specific
-2. Be empathetic and professional
+CRITICAL RULES:
+1. If user's gender is already known, DO NOT ask about it again
+2. Ask ONLY about {current_target} that support the case - be specific and direct
 3. Use simple, clear language
-4. Reference previously collected information and user's query naturally if relevant
-5. Make it easy for the user to answer
+4. Reference previously collected information naturally
 
 YOUR QUESTION:"""
 
-#     ANSWER_EXTRACTION_PROMPT = """Extract the answer from the User's Response based on the Question asked.
-# CONTEXT:{root_query}
-# QUESTION ASKED: {last_question}.
-# USER'S RESPONSE: {user_response}
+    ANSWER_EXTRACTION_PROMPT = """Extract ONLY the direct answer to the question from the user's response.
 
-# Generate ONLY the relevant information that answers what we asked about.
-# Be concise but capture all relevant details.
-
-
-# RESPONSE FORMAT (Strictly JSON only, no other text):
-# {{
-#     "extracted_answer": "generated answer that supports the question or NOT_PROVIDED",
-#     "additional_context": "any other relevant details from the response else \"\""
-# }}
-# ANALYSIS (JSON only):"""
-    ANSWER_EXTRACTION_PROMPT = """Extract the answer from the User's Response based strictly on the Question asked.
-
-IMPORTANT RULES:
-- If the user's response directly answers the question, you MUST place it in "extracted_answer".
-- DO NOT put the direct answer in "additional_context".
-- Use "NOT_PROVIDED" ONLY if the user does not answer the question at all.
-
-CONTEXT: {root_query}
 QUESTION ASKED: {last_question}
 USER'S RESPONSE: {user_response}
 
-Generate ONLY the relevant information that answers the question.
+EXTRACTION RULES:
+1. If the user directly answers the question, extract that answer
+2. Be concise - extract only the relevant part
+3. If user says "yes", "no", "I am", etc., extract the actual answer (e.g., "yes" → "female") and generate comprehensive answer based on the question and context
+4. If user provides no relevant answer, return "NOT_PROVIDED"
+5. DO NOT add extra context or interpretations
 
-RESPONSE FORMAT (Strictly JSON only, no other text):
+EXAMPLES:
+Q: "Are you the husband or wife in this marriage?"
+Response: "I am the wife" → Extract: "wife"
+
+Q: "What is your gender?"
+Response: "female" → Extract: "female"
+
+Q: "When did you get married?"
+Response: "We got married in 2020" → Extract: "2020"
+
+Response: "I don't remember" → Extract: "NOT_PROVIDED"
+
+NOW EXTRACT:
+Response (JSON only, no other text):
 {{
-    "extracted_answer": "direct answer OR NOT_PROVIDED",
-    "additional_context": "supporting or secondary details only, else \"\""
-}}
-ANALYSIS (JSON only):"""
+    "extracted_answer": "the comprehensive generated answer based on user responseOR NOT_PROVIDED"
+}}"""
     
     def __init__(self, huggingface_api_key: str = None):
         """Initialize the InformationGatherer with LLM."""
@@ -91,27 +80,14 @@ ANALYSIS (JSON only):"""
                 repo_id=os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
                 huggingfacehub_api_token=api_key,
                 task="text-generation",
-                max_new_tokens=512,
-            )
-        )
-        self.llm2 = ChatHuggingFace(
-            llm=HuggingFaceEndpoint(
-                repo_id="mistralai/Ministral-3-8B-Instruct-2512-BF16",
-                huggingfacehub_api_token=api_key,
-                task="text-generation",
-                max_new_tokens=512,
+                max_new_tokens=256,
+                temperature=0.1,  # Lower temperature for more consistent extraction
             )
         )
     
-    def gather_next_information(self, state: FamilyLawState) -> Dict:
+    def gather_next_information(self, state: Dict) -> Dict:
         """
         Main logic: Extract answer from previous response OR ask next question.
-        
-        Flow:
-        1. If gathering_step > 0: Extract answer from last user message
-        2. Update info_collected, remove from info_needed_list
-        3. If still need info: Generate next question
-        4. If no more info needed: Mark as complete
         """
         query = state["query"]
         root_query = state.get("root_query", query)
@@ -123,63 +99,55 @@ ANALYSIS (JSON only):"""
         
         logger.info(f"=== Gathering Step {gathering_step} ===")
         logger.info(f"Info needed: {info_needed_list}")
-        logger.info(f"Info collected keys: {list(info_collected.keys())}")
+        logger.info(f"Info collected: {list(info_collected.keys())}")
         
-        # STEP 1: Check if we need to extract an answer from previous response
+        # STEP 1: Extract answer from previous response if applicable
         if gathering_step > 0 and info_needed_list:
-            # Get the target we were asking about (stored separately or use first in list)
             current_target = state.get("current_question_target") or info_needed_list[0]
             
-            # Find the last user message
-            last_user_msg = None
+            # Get user's response
             user_messages = [m for m in messages if m.__class__.__name__ == "HumanMessage"]
             
-            # Skip the initial query, get the response to our question
             if len(user_messages) > gathering_step:
                 last_user_msg = user_messages[gathering_step]
+                last_question = state.get("follow_up_question", "")
                 
-            if last_user_msg:
                 logger.info(f"Extracting answer for: {current_target}")
-                logger.info(f"From response: {last_user_msg.content[:100]}...")
-                last_question = state.get("follow_up_question", "N/A")
+                logger.info(f"Question was: {last_question}")
+                logger.info(f"User response: {last_user_msg.content[:100]}...")
+                
                 # Extract the information
-                print(f"Question: {last_question}\nResponse: {last_user_msg.content}\nTarget: {current_target}\n")
-                response = self._extract_information(
-                    root_query,
-                    last_question,
-                    last_user_msg.content,
-                    current_target
+                extracted = self._extract_information(
+                    last_question=last_question,
+                    user_response=last_user_msg.content,
+                    info_target=current_target
                 )
-
-                # Parse the JSON response
-                try:
-                    extraction_json = json.loads(response)
-                    extracted = extraction_json.get("extracted_answer", "NOT_PROVIDED")
-                    additional_context = extraction_json.get("additional_context", "")
-                    if additional_context:
-                        info_collected["additional_info"] = additional_context + "\n" + info_collected.get("additional_info", "")
-                except Exception as e:
-                    logger.error(f"Error parsing extraction JSON: {str(e)}")
-                    extracted = response  # Fallback to raw response
                 
-                logger.info(f"Extracted value: {extracted[:100]}...")
+                logger.info(f"Extracted: {extracted}")
                 
-                # CRITICAL: Store the answer and remove from needed list
+                # Store the answer
                 if extracted and extracted != "NOT_PROVIDED":
-                    info_collected[current_target] = extracted
-                    # Remove this item from needed list
+                    # Special handling for gender
+                    if current_target == "user_gender":
+                        extracted = self._normalize_gender(extracted)
+                        info_collected["user_gender"] = extracted
+                        logger.info(f"✓ Gender identified and stored: {extracted}")
+                    else:
+                        info_collected[current_target] = extracted
+                        logger.info(f"✓ Stored: {current_target} = {extracted}")
+                    
+                    # Remove from needed list
                     if current_target in info_needed_list:
                         info_needed_list.remove(current_target)
-                    
-                    logger.info(f"✓ Stored answer for: {current_target}")
-                    logger.info(f"Updated needed list: {info_needed_list}")
                 else:
-                    info_collected["additional_info"] = last_user_msg.content.strip() + "\n"+info_collected.get("additional_info", "") 
-                    logger.warning(f"User didn't provide {current_target}, keeping in list")
+                    # Store in additional_info if not the target answer
+                    additional = info_collected.get("additional_info", "")
+                    info_collected["additional_info"] = f"{additional}\n{last_user_msg.content}".strip()
+                    logger.warning(f"Could not extract {current_target}, stored in additional_info")
         
-        # STEP 2: Check if we're done
+        # STEP 2: Check if done
         if not info_needed_list:
-            logger.info("✓ All information collected! Gathering complete.")
+            logger.info("✓ All information collected!")
             return {
                 "needs_more_info": False,
                 "info_collected": info_collected,
@@ -188,19 +156,32 @@ ANALYSIS (JSON only):"""
                 "current_question_target": None
             }
         
-        # STEP 3: Generate next question for the first item in needed list
+        # STEP 3: Generate next question
         next_target = info_needed_list[0]
+        
+        # Skip if gender already collected
+        if next_target == "user_gender" and "user_gender" in info_collected:
+            logger.info("Gender already known, skipping...")
+            info_needed_list.remove("user_gender")
+            if not info_needed_list:
+                return {
+                    "needs_more_info": False,
+                    "info_collected": info_collected,
+                    "info_needed_list": [],
+                    "gathering_step": gathering_step,
+                    "current_question_target": None
+                }
+            next_target = info_needed_list[0]
+        
         logger.info(f"Generating question for: {next_target}")
         
         next_question = self._generate_question(
-            root_query,
-            user_intent,
-            info_collected,
-            next_target,
-            info_needed_list
+            root_query=root_query,
+            user_intent=user_intent,
+            info_collected=info_collected,
+            current_target=next_target,
+            all_remaining=info_needed_list
         )
-        
-        logger.info(f"Generated question: {next_question[:100]}...")
         
         return {
             "needs_more_info": True,
@@ -211,6 +192,26 @@ ANALYSIS (JSON only):"""
             "current_question_target": next_target
         }
     
+    def _normalize_gender(self, text: str) -> str:
+        """Normalize gender responses to consistent values."""
+        text_lower = text.lower().strip()
+        
+        # Female indicators
+        if any(word in text_lower for word in ["wife", "woman", "female", "girl", "she", "her"]):
+            return "female"
+        
+        # Male indicators
+        if any(word in text_lower for word in ["husband", "man", "male", "boy", "he", "him"]):
+            return "male"
+        
+        # Direct answers
+        if "f" == text_lower[0]:
+            return "female"
+        if "m" == text_lower[0]:
+            return "male"
+        
+        return text
+    
     def _generate_question(
         self,
         root_query: str,
@@ -219,77 +220,104 @@ ANALYSIS (JSON only):"""
         current_target: str,
         all_remaining: List[str]
     ) -> str:
-        """Generate a focused question for the specific information needed."""
+        """Generate a focused question."""
         
         collected_str = self._format_info_collected(info_collected)
         
-        # Prepare prompt
         prompt = self.QUESTION_GENERATION_PROMPT.format(
             root_query=root_query,
             user_intent=user_intent.replace("_", " ").title(),
             info_collected=collected_str or "None yet",
-            current_target=current_target.replace("_", " ").title(),
-            all_remaining=", ".join([x.replace("_", " ") for x in all_remaining])
+            current_target=current_target.replace("_", " ").title()
         )
         
         try:
             conversation = [
-                SystemMessage(content="You are an empathetic law attorney. Ask ONE focused question."),
+                SystemMessage(content="You are an empathetic attorney. Ask ONE clear question."),
                 HumanMessage(content=prompt)
             ]
             
             response = self.llm.invoke(conversation)
             question = response.content.strip()
             
-            # Clean up any extra text
+            # Clean response
             if "YOUR QUESTION:" in question:
                 question = question.split("YOUR QUESTION:")[-1].strip()
-            if "Question:" in question:
-                question = question.split("Question:")[-1].strip()
-            
-            # Remove quotes if present
             question = question.strip('"\'')
             
             return question
         
         except Exception as e:
-            logger.error(f"Error generating question: {str(e)}")
-            # Fallback
-            return f"Could you please provide information about: {current_target.replace('_', ' ')}?"
+            logger.error(f"Error generating question: {e}")
+            return f"Could you please provide information about your {current_target.replace('_', ' ')}?"
     
-    def _extract_information(self, last_question: str, user_response: str, info_target: str, root_query: str) -> str:
-        """Extract specific information from user's response."""
+    def _extract_information(
+        self, 
+        last_question: str, 
+        user_response: str, 
+        info_target: str
+    ) -> str:
+        """Extract specific information with improved logic."""
         
+        # Quick pattern matching for common answers
+        user_lower = user_response.lower().strip()
+        
+        # Gender-specific quick extraction
+        if "gender" in info_target.lower():
+            if any(word in user_lower for word in ["wife", "woman", "female", "girl", "she"]):
+                return "female"
+            if any(word in user_lower for word in ["husband", "man", "male", "boy", "he"]):
+                return "male"
+        
+        # Simple yes/no to actual values
+        if "yes" in user_lower and len(user_lower) < 10:
+            # Extract from question what they're saying yes to
+            if "wife" in last_question.lower():
+                return "wife"
+            if "female" in last_question.lower():
+                return "female"
+        
+        # Use LLM for complex extraction
         prompt = self.ANSWER_EXTRACTION_PROMPT.format(
-            root_query=root_query,
             last_question=last_question,
-            # info_target=info_target.replace("_", " ").title(),
             user_response=user_response
         )
         
         try:
             conversation = [
-                SystemMessage(content="Extract only the relevant answer. Be concise."),
+                SystemMessage(content="Extract only the direct answer. Return JSON."),
                 HumanMessage(content=prompt)
             ]
             
             response = self.llm.invoke(conversation)
-            extracted = response.content.strip()
+            response_text = response.content.strip()
             
-            # Clean up
-            if "EXTRACTED ANSWER:" in extracted:
-                extracted = extracted.split("EXTRACTED ANSWER:")[-1].strip()
+            # Parse JSON
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
             
-            extracted = extracted.strip('"\'')
+            try:
+                data = json.loads(response_text)
+                extracted = data.get("extracted_answer", "NOT_PROVIDED")
+            except:
+                # Fallback: look for the pattern
+                if '"extracted_answer"' in response_text:
+                    import re
+                    match = re.search(r'"extracted_answer":\s*"([^"]+)"', response_text)
+                    extracted = match.group(1) if match else user_response.strip()
+                else:
+                    extracted = user_response.strip()
             
-            # If extraction failed or empty, use full response
-            if not extracted or len(extracted) < 3:
-                extracted = user_response.strip()
+            # Normalize if it's a gender answer
+            if "gender" in info_target.lower() and extracted != "NOT_PROVIDED":
+                extracted = self._normalize_gender(extracted)
             
             return extracted
         
         except Exception as e:
-            logger.error(f"Error extracting information: {str(e)}")
+            logger.error(f"Extraction error: {e}")
             return user_response.strip()
     
     def _format_info_collected(self, info_collected: Dict) -> str:
@@ -299,5 +327,6 @@ ANALYSIS (JSON only):"""
         
         formatted = []
         for key, value in info_collected.items():
-            formatted.append(f"- {key.replace('_', ' ').title()}: {value}")
+            if key != "additional_info":  # Skip additional_info in display
+                formatted.append(f"- {key.replace('_', ' ').title()}: {value}")
         return "\n".join(formatted)

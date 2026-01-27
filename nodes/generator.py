@@ -1,7 +1,10 @@
 """
-Enhanced Generator Node with Explainable AI
+Fixed Generator Node - Does NOT append reasoning to response text.
 
-Generates legal advice with transparent reasoning chains and precedent explanations.
+Key fixes:
+1. Reasoning and citations returned separately in state
+2. NOT appended to response_content
+3. Clean response without scaffold text
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -22,7 +25,6 @@ logger = logging.getLogger(__name__)
 # Initialize LLM
 llm = ChatHuggingFace(
     llm=HuggingFaceEndpoint(
-        # repo_id="meta-llama/Llama-3.1-8B-Instruct",
         repo_id = os.getenv("LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
         huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_KEY"),
         task="conversational",
@@ -92,7 +94,8 @@ def format_case_info(info_collected: Dict, user_intent: str) -> str:
 
 def generate_response(state: FamilyLawState) -> Dict:
     """
-    Generate comprehensive legal advice with transparent reasoning.
+    Generate legal advice WITHOUT appending reasoning to response text.
+    Reasoning returned separately in state.
     """
     query = state["query"]
     retrieved_chunks = state.get("retrieved_chunks", [])
@@ -152,6 +155,40 @@ YOUR COMPLETE RESPONSE:"""
         response = llm.invoke(conversation)
         response_content = response.content
         
+        # *** CRITICAL CLEANING: Remove any appended reasoning/JSON ***
+        # Check for common patterns that indicate appended content
+        cleanup_markers = [
+            "Here is the generated reasoning",
+            "Here is the analysis in JSON",
+            "Here is my analysis in JSON",
+            "```json",
+            '{"reasoning_steps"',
+            '{"similarity_score"',
+            "WIN PROBABILITY ESTIMATE:",
+            "CASE STRENGTH FACTORS:"
+        ]
+        
+        for marker in cleanup_markers:
+            if marker in response_content:
+                response_content = response_content.split(marker)[0].strip()
+                logger.warning(f"⚠️ Removed appended content after marker: {marker}")
+        
+        # Remove any trailing JSON
+        if response_content.rstrip().endswith('}'):
+            # Check if last 500 chars look like JSON
+            tail = response_content[-500:]
+            if tail.count('{') > 2 or tail.count('"') > 10:
+                # Find the last sentence before JSON starts
+                sentences = response_content.split('.')
+                clean_sentences = []
+                for sentence in sentences:
+                    if '{' not in sentence and '"reasoning' not in sentence.lower():
+                        clean_sentences.append(sentence)
+                    else:
+                        break
+                response_content = '.'.join(clean_sentences) + '.'
+                logger.warning("⚠️ Removed trailing JSON from response")
+        
         # Check if response seems truncated
         if len(response_content) < 500:
             logger.warning(f"Response seems short: {len(response_content)} chars")
@@ -160,6 +197,7 @@ YOUR COMPLETE RESPONSE:"""
         reasoning_steps = []
         precedent_explanations = []
         
+        # Generate reasoning separately (NOT appended to response)
         if include_reasoning:
             try:
                 logger.info("🧠 Generating reasoning chain...")
@@ -180,49 +218,52 @@ YOUR COMPLETE RESPONSE:"""
                     retrieved_chunks=retrieved_chunks
                 )
                 
-                # Append reasoning to response
-                # reasoning_text = explainer.format_reasoning_for_response(reasoning_steps)
-                # response_content += "\n\n" + reasoning_text
+                # *** CRITICAL: DO NOT APPEND TO response_content ***
+                # The reasoning is returned separately in the state
+                # DO NOT modify response_content here
                 
-                # # Append precedent explanations
-                # if precedent_explanations:
-                #     response_content += "\n\n" + "="*60
-                #     response_content += "\n📚 WHY THESE PRECEDENTS MATTER"
-                #     response_content += "\n" + "="*60
-                    
-                #     for i, explanation in enumerate(precedent_explanations, 1):
-                #         response_content += f"\n\n**Precedent {i}:**"
-                #         response_content += explainer.format_precedent_explanation(explanation)
-                
-                logger.info(f"   ✓ Added {len(reasoning_steps)} reasoning steps")
-                logger.info(f"   ✓ Added {len(precedent_explanations)} precedent explanations")
+                logger.info(f"   ✓ Generated {len(reasoning_steps)} reasoning steps (NOT appended)")
+                logger.info(f"   ✓ Generated {len(precedent_explanations)} precedent explanations (NOT appended)")
                 
             except Exception as e:
                 logger.error(f"Failed to generate reasoning: {e}", exc_info=True)
-                # Continue without reasoning rather than failing
         
-        # Add outcome prediction if requested
-        if include_prediction and info_collected and len(info_collected) >= 30:
-            try:
-                predictor = CaseOutcomePredictor()
-                prediction = predictor.predict_outcome(
-                    user_intent=user_intent,
-                    info_collected=info_collected,
-                    retrieved_precedents=retrieved_chunks
-                )
-                
-                # prediction_text = predictor.format_prediction_for_display(prediction)
-                # response_content += "\n\n" + prediction_text
-                
-                state["prediction"] = {
-                    "probability_range": prediction.win_probability_range,
-                    "case_strength": prediction.case_strength.value,
-                    "confidence": prediction.confidence_level
-                }
-            except Exception as e:
-                logger.error(f"Prediction failed: {e}")
+        # *** CRITICAL CHECK: Ensure nothing was accidentally appended ***
+        # Remove any JSON or reasoning text that might have been added
+        if "reasoning_steps" in response_content or "{" in response_content[-500:]:
+            # Find where the actual legal advice ends (before any JSON)
+            if "Here is the generated reasoning" in response_content:
+                response_content = response_content.split("Here is the generated reasoning")[0].strip()
+            elif "```json" in response_content:
+                response_content = response_content.split("```json")[0].strip()
+            elif '{"reasoning_steps"' in response_content:
+                response_content = response_content.split('{"reasoning_steps"')[0].strip()
+            
+            logger.warning("⚠️ Removed accidentally appended reasoning from response_content")
         
-        # Add disclaimer
+        # Add outcome prediction if requested (also NOT appended)
+        prediction_data = None
+        # if include_prediction and info_collected and len(info_collected) >= 30:
+        #     try:
+        #         predictor = CaseOutcomePredictor()
+        #         prediction = predictor.predict_outcome(
+        #             user_intent=user_intent,
+        #             info_collected=info_collected,
+        #             retrieved_precedents=retrieved_chunks
+        #         )
+                
+        #         # Store prediction separately, NOT in response text
+        #         prediction_data = {
+        #             "probability_range": prediction.win_probability_range,
+        #             "case_strength": prediction.case_strength.value,
+        #             "confidence": prediction.confidence_level
+        #         }
+                
+        #         logger.info(f"   ✓ Generated prediction: {prediction.case_strength.value}")
+        #     except Exception as e:
+        #         logger.error(f"Prediction failed: {e}")
+        
+        # Add disclaimer to response
         if "not a substitute for legal advice" not in response_content.lower():
             response_content += "\n\n---\n**Disclaimer**: This information is for educational purposes only and does not constitute legal advice. Please consult with a qualified family law attorney for personalized legal guidance."
         
@@ -254,11 +295,13 @@ YOUR COMPLETE RESPONSE:"""
                 "citation": explanation.citation
             })
         
+        # Return clean response with reasoning/citations separate
         return {
-            "response": response_content,
+            "response": response_content,  # CLEAN - No reasoning appended
             "messages": conversation + [response],
-            "reasoning_steps": reasoning_steps_dict,
-            "precedent_explanations": precedent_explanations_dict
+            "reasoning_steps": reasoning_steps_dict,  # Separate
+            "precedent_explanations": precedent_explanations_dict,  # Separate
+            "prediction": prediction_data  # Separate
         }
     
     except Exception as e:
